@@ -1,0 +1,407 @@
+"""VRAM プロファイル見積り (llmkit/vram.py) のテスト。
+
+このファイルは 2 つの guard_test を含む:
+
+- ``test_estimate_is_pure_and_needs_no_gpu`` … D-01 (静的テーブルのみで見積もる)
+- ``test_all_vram_values_are_gib``           … D-03 (単位は GiB に統一する)
+"""
+
+from __future__ import annotations
+
+import ast
+import dataclasses
+import itertools
+import socket
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from llmkit.catalog import ModelSpec, get_model_spec
+from llmkit.config import AppConfig, GenerationParams, VramConfig, load_config
+from llmkit.errors import ConfigError, VramBudgetExceededError
+from llmkit.vram import (
+    ResolvedProfile,
+    VramEstimate,
+    check_budget,
+    estimate_profile,
+    estimate_resolved_profile,
+    resolve_profile,
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
+
+# 要件書 L74-L76 の構成表。帯は仕様書 §4 T2 の受け入れ基準。
+REQUIREMENTS_BAND_GIB = (12.0, 13.5)
+
+# テスト専用のダミー。予算ガード本体の検証をカタログ値のキャリブレーションから切り離す。
+HUGE_MODEL = ModelSpec(
+    model_id="test-huge-20gib",
+    served_name="test-huge:20gib",
+    role="generation",
+    quantization="none",
+    weights_gib=20.0,
+    kv_gib_per_1k_tokens=0.0,
+    max_context_tokens=4096,
+    source_note="テスト専用のダミー。カタログには登録しない",
+)
+SYNTHETIC_PROFILE = ResolvedProfile(name="synthetic_oversized", models=(HUGE_MODEL,))
+
+
+@pytest.fixture
+def config() -> AppConfig:
+    return load_config(DEFAULT_CONFIG)
+
+
+def with_vram(
+    config: AppConfig,
+    *,
+    budget_gib: float | None = None,
+    runtime_overhead_gib: float | None = None,
+) -> AppConfig:
+    """``[vram]`` の一部だけを差し替えた設定を返す (他は同一)。"""
+    vram = VramConfig(
+        budget_gib=config.vram.budget_gib if budget_gib is None else budget_gib,
+        runtime_overhead_gib=(
+            config.vram.runtime_overhead_gib
+            if runtime_overhead_gib is None
+            else runtime_overhead_gib
+        ),
+        active_profile=config.vram.active_profile,
+    )
+    return dataclasses.replace(config, vram=vram)
+
+
+def with_context_tokens(config: AppConfig, context_tokens: int) -> AppConfig:
+    return dataclasses.replace(
+        config,
+        generation=dataclasses.replace(
+            config.generation, context_tokens=context_tokens
+        ),
+    )
+
+
+# --------------------------------------------------------------------------
+# プロファイル解決
+# --------------------------------------------------------------------------
+
+
+def test_resolve_profile_defaults_to_active_profile(config: AppConfig) -> None:
+    profile = resolve_profile(config)
+
+    assert profile.name == "rag_default"
+    assert profile.model_ids == ("qwen3-14b", "ruri-v3-310m", "ruri-reranker")
+    assert profile.generation.model_id == "qwen3-14b"
+
+
+def test_resolve_unknown_profile_raises_config_error(config: AppConfig) -> None:
+    with pytest.raises(ConfigError) as excinfo:
+        resolve_profile(config, "no_such_profile")
+
+    assert "no_such_profile" in str(excinfo.value)
+
+
+def test_resolve_profile_raises_config_error_for_unregistered_model_when_local(
+    config: AppConfig,
+) -> None:
+    """カタログ未登録モデルは is_local=true のプロファイルでは通さない (D-01)。"""
+    local_external = dataclasses.replace(
+        config,
+        generation=dataclasses.replace(config.generation, model="gpt-4o-mini"),
+        profiles={
+            **config.profiles,
+            "rag_default": dataclasses.replace(
+                config.profiles["rag_default"], generation="gpt-4o-mini"
+            ),
+        },
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        resolve_profile(local_external, "rag_default")
+
+    assert "gpt-4o-mini" in str(excinfo.value)
+
+
+def test_resolve_profile_allows_passthrough_model_for_remote_runtime(
+    config: AppConfig,
+) -> None:
+    """F-1-001: is_local=false ならカタログ未登録モデルでも解決できる。
+
+    見積りには寄与しないため (weights_gib=kv_gib_per_1k_tokens=0.0)、合計は
+    embedding/reranker の重みと overhead のみになる。
+    """
+    remote_external = dataclasses.replace(
+        config,
+        runtime=dataclasses.replace(config.runtime, is_local=False),
+        generation=dataclasses.replace(config.generation, model="gpt-4o-mini"),
+        profiles={
+            **config.profiles,
+            "rag_default": dataclasses.replace(
+                config.profiles["rag_default"], generation="gpt-4o-mini"
+            ),
+        },
+    )
+
+    profile = resolve_profile(remote_external, "rag_default")
+
+    assert profile.generation.model_id == "gpt-4o-mini"
+    assert profile.generation.served_name == "gpt-4o-mini"
+    assert profile.generation.weights_gib == pytest.approx(0.0)
+
+    estimate = estimate_resolved_profile(profile, remote_external, context_tokens=16384)
+    expected_embedding_reranker = get_model_spec("ruri-v3-310m").weights_gib + (
+        get_model_spec("ruri-reranker").weights_gib
+    )
+    assert estimate.weights_total_gib == pytest.approx(expected_embedding_reranker)
+    assert estimate.kv_cache_gib == pytest.approx(0.0)
+
+
+# --------------------------------------------------------------------------
+# 見積り式
+# --------------------------------------------------------------------------
+
+
+def test_estimate_follows_the_documented_formula(config: AppConfig) -> None:
+    """weights の総和 + KV + overhead という式そのものを固定する。"""
+    estimate = estimate_profile(config, "rag_default", context_tokens=16384)
+
+    expected_weights = sum(
+        get_model_spec(model_id).weights_gib
+        for model_id in ("qwen3-14b", "ruri-v3-310m", "ruri-reranker")
+    )
+    expected_kv = get_model_spec("qwen3-14b").kv_gib_per_1k_tokens * (16384 / 1024)
+
+    assert estimate.weights_total_gib == pytest.approx(expected_weights)
+    assert estimate.kv_cache_gib == pytest.approx(expected_kv)
+    assert estimate.runtime_overhead_gib == pytest.approx(0.8)
+    assert estimate.total_gib == pytest.approx(expected_weights + expected_kv + 0.8)
+    assert estimate.weights_gib == {
+        "qwen3-14b": pytest.approx(9.0),
+        "ruri-v3-310m": pytest.approx(0.7),
+        "ruri-reranker": pytest.approx(0.8),
+    }
+
+
+def test_documented_profiles_match_requirements_table(config: AppConfig) -> None:
+    """要件書 L74-L76 の構成1 / 構成2 / 構成3 の再現 (E7 のゴールデン帯)。"""
+    low, high = REQUIREMENTS_BAND_GIB
+
+    configuration_1 = estimate_profile(config, "rag_default", context_tokens=16384)
+    configuration_2 = estimate_profile(config, "long_context", context_tokens=131072)
+    configuration_3 = estimate_profile(config, "oversized", context_tokens=131072)
+
+    # 構成1: 約 12〜13GB
+    assert low <= configuration_1.total_gib <= high
+    # 構成2: 約 13GB。予算 16.0 GiB に収まる
+    assert low <= configuration_2.total_gib <= high
+    assert configuration_2.within_budget
+    assert configuration_2.budget_gib == pytest.approx(16.0)
+    # 構成3 (非推奨): 構成1・構成2 のいずれよりも大きい
+    assert configuration_3.total_gib > configuration_1.total_gib
+    assert configuration_3.total_gib > configuration_2.total_gib
+
+
+def test_context_tokens_change_estimate(config: AppConfig) -> None:
+    """E2: context_tokens を増やすと見積りが単調増加する (増分が 0 でない)。"""
+    contexts = (4096, 8192, 16384, 32768, 65536, 131072)
+    totals = [
+        estimate_profile(config, "rag_default", context_tokens=ctx).total_gib
+        for ctx in contexts
+    ]
+
+    for smaller, larger in itertools.pairwise(totals):
+        assert larger > smaller
+
+    small = estimate_profile(config, "rag_default", context_tokens=4096)
+    large = estimate_profile(config, "rag_default", context_tokens=131072)
+    kv_rate = get_model_spec("qwen3-14b").kv_gib_per_1k_tokens
+    assert large.total_gib - small.total_gib == pytest.approx(
+        kv_rate * ((131072 - 4096) / 1024)
+    )
+
+
+def test_context_tokens_from_config_is_used_when_not_overridden(
+    config: AppConfig,
+) -> None:
+    """generation.context_tokens が既定値として見積りに配線されていること。"""
+    changed = with_context_tokens(config, 32768)
+
+    assert estimate_profile(changed, "rag_default").context_tokens == 32768
+    assert (
+        estimate_profile(changed, "rag_default").total_gib
+        > estimate_profile(config, "rag_default").total_gib
+    )
+
+
+def test_overhead_changes_estimate(config: AppConfig) -> None:
+    """E5: runtime_overhead_gib を 0.8 -> 2.0 にすると合計が厳密に 1.2 増える。"""
+    baseline = estimate_profile(config, "rag_default", context_tokens=16384)
+    raised = estimate_profile(
+        with_vram(config, runtime_overhead_gib=2.0), "rag_default", context_tokens=16384
+    )
+
+    assert baseline.runtime_overhead_gib == pytest.approx(0.8)
+    assert raised.runtime_overhead_gib == pytest.approx(2.0)
+    assert raised.total_gib - baseline.total_gib == pytest.approx(1.2)
+
+
+# --------------------------------------------------------------------------
+# 予算判定
+# --------------------------------------------------------------------------
+
+
+def test_check_budget_returns_estimate_when_within_budget(config: AppConfig) -> None:
+    estimate = check_budget(resolve_profile(config, "rag_default"), config)
+
+    assert estimate.within_budget
+    assert estimate.excess_gib == pytest.approx(0.0)
+
+
+def test_synthetic_oversized_profile_raises_with_full_breakdown(
+    config: AppConfig,
+) -> None:
+    """予算ガード本体の検証。カタログのキャリブレーションに依存させない。"""
+    with pytest.raises(VramBudgetExceededError) as excinfo:
+        check_budget(SYNTHETIC_PROFILE, config, context_tokens=16384)
+
+    error = excinfo.value
+    expected_total = 20.0 + 0.8
+    assert error.profile_name == "synthetic_oversized"
+    assert error.total_gib == pytest.approx(expected_total)
+    assert error.budget_gib == pytest.approx(16.0)
+    assert error.excess_gib == pytest.approx(expected_total - 16.0)
+    assert error.kv_cache_gib == pytest.approx(0.0)
+    assert error.runtime_overhead_gib == pytest.approx(0.8)
+    assert error.weights_gib == {"test-huge-20gib": pytest.approx(20.0)}
+
+    message = str(error)
+    assert "synthetic_oversized" in message  # プロファイル名
+    assert "20.80" in message  # 合計値
+    assert "16.00" in message  # 予算値
+    assert "4.80" in message  # 超過量
+
+
+def test_budget_threshold_changes_verdict(config: AppConfig) -> None:
+    """E4: 同一プロファイル・同一カタログで budget_gib だけを変えると判定が反転する。
+
+    rag_default の見積りは 12.90 GiB (= 10.5 + 1.6 + 0.8)。仕様書 §4 T2 は
+    「13.0 に下げると超過側に転ぶ」と書いているが 12.90 <= 13.0 のため反転しない。
+    カタログ値を勝手に大きくしない (仕様書 §7 リスク2) ため、超過側の閾値は
+    見積り値の直下である 12.5 を用いる。詳細は仕様書 §4 T2 の追記を参照。
+    """
+    profile = resolve_profile(config, "rag_default")
+    baseline = estimate_resolved_profile(profile, config, context_tokens=16384)
+    assert baseline.total_gib == pytest.approx(12.9)
+
+    generous = with_vram(config, budget_gib=16.0)
+    strict = with_vram(config, budget_gib=12.5)
+
+    assert check_budget(profile, generous, context_tokens=16384).within_budget
+
+    with pytest.raises(VramBudgetExceededError) as excinfo:
+        check_budget(profile, strict, context_tokens=16384)
+
+    assert excinfo.value.excess_gib == pytest.approx(0.4)
+
+
+def test_budget_check_is_skipped_for_remote_runtimes(config: AppConfig) -> None:
+    """runtime.is_local=false なら超過プロファイルでも例外を出さない。"""
+    remote = dataclasses.replace(
+        config, runtime=dataclasses.replace(config.runtime, is_local=False)
+    )
+
+    estimate = check_budget(SYNTHETIC_PROFILE, remote, context_tokens=16384)
+
+    assert estimate.total_gib > estimate.budget_gib
+    assert estimate.within_budget is False
+
+
+# --------------------------------------------------------------------------
+# guard_test (D-01 / D-03)
+# --------------------------------------------------------------------------
+
+
+def test_estimate_is_pure_and_needs_no_gpu(
+    config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-01: 見積りは静的テーブルのみで行い、GPU・外部プロセス・通信に触れない。"""
+    forbidden_modules = frozenset(
+        {
+            "subprocess",
+            "socket",
+            "httpx",
+            "requests",
+            "pynvml",
+            "torch",
+            "urllib",
+            "urllib.request",
+            "os",
+            "shutil",
+        }
+    )
+    for module_name in ("vram", "catalog"):
+        tree = ast.parse(
+            (REPO_ROOT / "llmkit" / f"{module_name}.py").read_text(encoding="utf-8")
+        )
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported.add(node.module)
+        clash = imported & forbidden_modules
+        assert not clash, (
+            f"llmkit/{module_name}.py が {sorted(clash)} を import している"
+        )
+
+    def explode(*args: object, **kwargs: object) -> object:
+        message = "見積りが外部リソースに触れた"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(subprocess, "run", explode)
+    monkeypatch.setattr(subprocess, "Popen", explode)
+    monkeypatch.setattr(socket, "socket", explode)
+    monkeypatch.setattr(socket, "create_connection", explode)
+
+    first = estimate_profile(config, "rag_default", context_tokens=16384)
+    second = estimate_profile(config, "rag_default", context_tokens=16384)
+
+    assert first.total_gib == second.total_gib
+    assert first == second
+
+
+def test_all_vram_values_are_gib() -> None:
+    """D-03: VRAM に関する数値は GiB に統一し、GB / MB / MiB を混在させない。"""
+    non_gib_units = ("_gb", "_mb", "_mib", "_kb", "_kib", "byte", "gigabyte")
+    float_fields = {
+        ModelSpec: {"weights_gib", "kv_gib_per_1k_tokens"},
+        VramConfig: {"budget_gib", "runtime_overhead_gib"},
+        VramEstimate: {
+            "weights_total_gib",
+            "kv_cache_gib",
+            "runtime_overhead_gib",
+            "total_gib",
+            "budget_gib",
+        },
+    }
+
+    for cls, expected_float_fields in float_fields.items():
+        names = {field.name for field in dataclasses.fields(cls)}
+        assert expected_float_fields <= names, cls
+        for name in names:
+            assert not any(unit in name for unit in non_gib_units), (cls, name)
+        for name in expected_float_fields:
+            assert "gib" in name, (cls, name)
+
+    # 派生値も GiB
+    assert "gib" in "excess_gib"
+    estimate = estimate_profile(load_config(DEFAULT_CONFIG), "rag_default")
+    assert isinstance(estimate.excess_gib, float)
+
+    # 要件書の「16GB」はコード上 16.0 GiB として扱う
+    assert load_config(DEFAULT_CONFIG).vram.budget_gib == pytest.approx(16.0)
+
+    # 生成パラメータ側にメモリ単位のフィールドを紛れ込ませない
+    for field in dataclasses.fields(GenerationParams):
+        assert not any(unit in field.name for unit in non_gib_units)

@@ -1,0 +1,47 @@
+# 外部 OpenAI 互換 API へ切り替える例 (ハイブリッド運用)。
+# api_key の「値」はここに書かない。環境変数名だけを api_key_env に書く。
+# base_url は実行マニフェスト・ログ・標準出力へ verbatim (そのまま) で
+# 記録される。認証情報を URL のどの位置 (userinfo/path/query/fragment) にも
+# 含めないこと (userinfo とクエリ・フラグメントは読み込み時に拒否されるが、
+# path 中の秘密は機械的には防げない)。ゲートウェイ型 API キー
+# (例 'https://host/<key>/v1') を base_url に書かないこと。
+
+[runtime]
+kind = "openai_compatible"
+base_url = "https://api.example.com/v1"
+api_key_env = "LLMKIT_API_KEY"
+timeout_s = 120.0
+# is_local = false のとき VRAM 予算ガードは無効化される (外部 API はローカル VRAM を使わない)
+is_local = false
+
+[generation]
+model = "qwen3-14b"
+context_tokens = 16384
+temperature = 0.7
+top_p = 0.9
+max_output_tokens = 1024
+seed = 0
+
+[vram]
+budget_gib = 16.0
+runtime_overhead_gib = 0.8
+active_profile = "rag_default"
+
+# 要件書 構成1: 生成 + 埋め込み + リランカーを 16 GiB に同居させる
+[profiles.rag_default]
+generation = "qwen3-14b"
+embedding = "ruri-v3-310m"
+reranker = "ruri-reranker"
+
+# 要件書 構成2: 長文要約。埋め込み・リランカーを退避する
+[profiles.long_context]
+generation = "gpt-oss-20b"
+
+[profiles.lightweight]
+generation = "qwen3-8b"
+
+# 要件書 構成3 (非推奨): 予算ガードが停止することの実証用に定義を残す
+[profiles.oversized]
+generation = "gpt-oss-20b"
+embedding = "ruri-v3-310m"
+reranker = "ruri-reranker"
