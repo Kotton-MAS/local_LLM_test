@@ -50,6 +50,57 @@ uv sync
 
 VS Code で **Dev Containers: Reopen in Container** を実行すると、Docker 環境が自動でビルドされます。
 
+## llmkit (Phase 1: 推論クライアント層)
+
+設定ファイルだけで推論先モデル・エンドポイント・VRAM プロファイルを切り替えられる
+OpenAI 互換クライアント層です。仕様は `docs/plans/2026-08-22-phase1-inference-client-l2.md`。
+
+### まず `doctor` を実行する
+
+```bash
+# 設定の検証 + VRAM 見積り + 実行マニフェスト出力 + ランタイム疎通確認
+uv run python -m llmkit.cli doctor --config configs/default.toml
+
+# 一問一答
+uv run python -m llmkit.cli chat "日本語で自己紹介して" --config configs/default.toml
+```
+
+**Phase 0 (Ollama の導入・`ollama pull`) が未了でも `doctor` は実行できます。**
+そのときは原因と対処方法を出して終了コード 1 で終わります。
+
+```
+エラー: 推論ランタイムに接続できません (base_url=http://localhost:11434/v1)。
+ランタイムが起動していない可能性があります / 対処: `ollama serve` でランタイムを
+起動するか、runtime.base_url が正しいか確認してください
+```
+
+VRAM 予算を超えるプロファイルを指定した場合は、**HTTP を 1 回も発行せずに**
+警告して停止します (要件書 L296 / 決定 D-04)。
+
+### 設定ファイル
+
+| ファイル | 用途 |
+|---|---|
+| `configs/default.toml` | ローカル Ollama (構成1 = 生成 + 埋め込み + リランカー) |
+| `configs/external_openai.toml` | 外部 OpenAI 互換 API への切り替え例 |
+
+- 推論先モデルの切り替えは `[generation] model` の変更**だけ**で済みます (コード変更不要)。
+- **api_key の値は設定ファイルに書きません。** 環境変数「名」を `runtime.api_key_env` に書き、
+  値は `export LLMKIT_API_KEY=...` で渡します (決定 D-05)。値を直接書くと読み込み時に落ちます。
+- VRAM の単位はすべて GiB です (決定 D-03)。
+
+### 実行マニフェスト
+
+起動のたびに、使用した設定・プロファイル・VRAM 内訳・設定ファイルの SHA-256 を
+`outputs/runs/{開始時刻}-{run_id}.json` に記録します (`outputs/` は gitignore 済み)。
+同じ設定なら `config_sha256` が一致するため、Phase 2 の比較実験の再現条件になります。
+
+### テスト
+
+テストは Ollama 未起動・ネットワーク不通でも全件パスします (`httpx.MockTransport` で完結)。
+実ランタイムに接続するテストを書く場合は `@pytest.mark.live` を付けてください。既定でスキップされ、
+`uv run pytest --run-live` を指定したときだけ実行されます (決定 D-02)。
+
 ## Project Structure
 
 ```

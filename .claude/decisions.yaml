@@ -1,0 +1,52 @@
+# 意図的な設計判断。散文ではなく構造データで持ち、guard_test を必須にする。
+#
+# 検証: python3 ~/.claude/scripts/check_decisions.py .claude/decisions.yaml
+#   - PostToolUse hook (check-decisions.sh) が編集直後に自動実行
+#   - Stop hook (verify-ci.sh) が停止前に guard_test を実走する
+#
+# 出典: docs/plans/2026-08-22-phase1-inference-client-l2.md §6
+
+- id: D-01
+  rule: "VRAM 使用量の見積りは llmkit/catalog.py の静的テーブルで行い、nvidia-smi や実測値の参照を行わない"
+  rationale: "Phase 0 (実測) が未実施であり、CI 環境には GPU が無い。かつ判定はモデルをロードする前に行う必要があるため、実測ベースでは原理的に成立しない。要件書 L60-L83 の表を唯一の出典とする"
+  guard_test: "tests/test_vram.py::test_estimate_is_pure_and_needs_no_gpu"
+
+- id: D-02
+  rule: "テストは実 HTTP を発行しない。実ランタイムに接続するテストは @pytest.mark.live を付け、--run-live 指定時のみ実行する"
+  rationale: "Ollama の導入は実装スコープ外でありユーザーの手動作業。CI (GitHub Actions) には Ollama が無いため、実接続テストは常に赤になる。httpx.MockTransport で全経路を決定論的に検証する"
+  guard_test: "tests/test_testing_policy.py::test_live_tests_are_skipped_by_default"
+
+- id: D-03
+  rule: "VRAM に関する数値の単位は GiB に統一する。GB と GiB を混在させず、要件書の 16GB は 16.0 GiB として扱う"
+  rationale: "実機 VRAM は 16376 MiB (= 15.99 GiB = 17.17 GB) であり、GB/GiB の取り違えは 7% の判定誤差になる。差分は vram.budget_gib の設定で吸収し、コード内では常に GiB を使う"
+  guard_test: "tests/test_vram.py::test_all_vram_values_are_gib"
+
+- id: D-04
+  rule: "VRAM 予算超過は WARNING ログを出したうえで VramBudgetExceededError を送出して停止する。警告のみで処理を継続せず、HTTP も発行しない"
+  rationale: "要件書 L296「16GB を超えるプロファイルを指定した場合、起動時に警告して停止する」。継続すると実行時 OOM になり、原因が特定しにくいエラーに化ける"
+  guard_test: "tests/test_bootstrap.py::test_oversized_profile_warns_and_aborts_without_http"
+
+- id: D-05
+  rule: "api_key は設定ファイルに直接書かず api_key_env (環境変数名) で参照し、SecretStr で保持する。ログ・実行マニフェスト・例外メッセージには環境変数名のみを出す"
+  rationale: "CLAUDE.md セキュリティ原則「認証情報のハードコード禁止」「ログへの認証情報出力禁止」。configs/*.toml はコミット対象のため、値を書ける形にすると事故が起きる"
+  guard_test: "tests/test_manifest.py::test_manifest_and_logs_never_contain_api_key"
+
+- id: D-06
+  rule: "llmkit パッケージはリポジトリ直下のフラットレイアウトに置き、src/ レイアウトにしない"
+  rationale: "既存 pyproject.toml に build-system が無く pythonpath=[.] で main.py を解決している。src/ に移すと pytest の pythonpath / mypy 対象 / CI の全てに変更が波及し、テンプレートの検証構成 (make ci) を壊す。パッケージ配布は Phase 1 の要件に無い"
+  guard_test: "tests/test_layout.py::test_llmkit_importable_from_repo_root"
+
+- id: D-07
+  rule: "推論ランタイムの JSON レスポンスは pydantic で厳格にパースし、必須フィールドの欠損は UpstreamError にする。dict[str, Any] のまま扱わない"
+  rationale: "mypy の disallow_any_explicit = true により Any を明示的に書けない。加えて、欠損を黙って None にすると Phase 2 の速度指標が静かに欠測し、比較結果が壊れる。パースを厳格にして早期に失敗させる"
+  guard_test: "tests/test_client.py::test_malformed_response_raises_upstream_error"
+
+- id: D-08
+  rule: "設定・レスポンスのスキーマは pydantic.dataclasses.dataclass + TypeAdapter で定義し、pydantic.BaseModel を継承しない"
+  rationale: "BaseModel を継承した定義行は mypy の disallow_any_explicit = true で explicit-any になり、pyproject の mypy 設定を緩めるか type: ignore を撒く以外に通す手段が無い。どちらもハード制約に反するため、ignore ゼロで済む pydantic dataclass を採る (仕様書 §7 リスク3 の判断基準に従った)"
+  guard_test: "tests/test_layout.py::test_schemas_use_pydantic_dataclasses_not_basemodel"
+
+- id: D-09
+  rule: "Phase 1 の『設定のみで切替』はカタログ登録済み model_id 間、および『ローカルと外部 API の切替』軸に限る。ランタイム固有の served_name (vLLM 等へ渡す実モデル名) を設定側から上書きする手段は Phase 1 には無く、Phase 2 で対応する"
+  rationale: "resolve_model_spec は is_local=false かつカタログ未登録の model_id を passthrough で許すが、is_local=true (ローカル実行) では VRAM 見積りの正確性 (D-01) が要件そのものであり、未登録モデルを黙って通すことはできない。ローカルでランタイムを差し替える (例: vLLM に実モデル名 'Qwen/Qwen3-14B-AWQ' を渡す) には現状 llmkit/catalog.py の編集が必要 (F-2-001 で実測確認)。設定側に [models.<id>] 上書き表を導入する恒久対応は別タスク (Phase 2) とし、今回のスコープでは行わない"
+  guard_test: "tests/test_catalog.py::test_resolve_model_spec_raises_config_error_for_unregistered_model_when_local"
