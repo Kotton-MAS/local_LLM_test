@@ -60,7 +60,8 @@ def test_load_default_config_returns_app_config() -> None:
     assert config.runtime.is_local is True
     assert config.generation.model == "qwen3-14b"
     assert config.generation.context_tokens == 16384
-    assert config.vram.budget_gib == pytest.approx(16.0)
+    # 実測でオフロードが始まらない増分の上限 (D-12)。カード容量ではない
+    assert config.vram.budget_gib == pytest.approx(14.0)
     assert config.vram.runtime_overhead_gib == pytest.approx(0.8)
     assert config.vram.active_profile == "rag_default"
     assert set(config.profiles) == {

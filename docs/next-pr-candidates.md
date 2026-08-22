@@ -50,3 +50,18 @@
 | INFO | 2 | F-2-008 | reviewer-security | `llmkit/config.py:75` | RuntimeConfig は __all__ で公開 API になっているため、L3 が RuntimeConfig(base_url=...) を直接構築する経路が正規に存在する。この経路で userinfo 付き URL を渡すと生の pydantic ValidationError が送出され、その str()… |
 | INFO | 3 | F-3-002 | reviewer-security | `llmkit/config.py:98` | urlparse が分離する 6 成分のうち query / fragment / userinfo は拒否されるが params (RFC 3986 の path parameter、/v1;key=SECRET) は素通りする。fixer は「path 中の秘密は機械判別できないため注意喚起のみ」としたが、para… |
 | INFO | 3 | F-3-004 | reviewer-test | `tests/test_config.py:103` | fixer の判断『gt=0 系フィールド (context_tokens, max_output_tokens, budget_gib, timeout_s) は既存の「0を拒否する」テストで gt/ge 境界が固定済み』について、read-only 制約により Field(gt=0) → Field(ge=0) へ… |
+
+## Phase 0 実測で判明した課題 (2026-08-22 追記)
+
+出典: `docs/phase0-vram-measurements.md`
+
+| 優先度 | 課題 | 決定した扱い |
+|---|---|---|
+| **HIGH** | 埋め込み `ruri-v3-310m` とリランカー `ruri-reranker-large` は GGUF を持たず `ollama pull` できない。Phase 0 受け入れ条件「埋め込み・リランカーの取得と単発実行」が未達で、構成1 (14B + 埋め込み + リランカー) の同居実測も未実施 | **Phase 3 着手時に方式を決める**。選択肢は (A) 有志の GGUF 変換版 (`Targoyle/ruri-v3-310m-GGUF` 等。リランカーの GGUF は未発見) / (B) Ollama 公式の `bge-m3` に変更 / (C) 埋め込み・リランカーだけ別ランタイム (sentence-transformers 等)。**Ollama にはリランキング API 自体が無い**ため C が有力 |
+| ~~MEDIUM~~ | 要件書の VRAM 表と実測が乖離している (`gpt-oss-20b` は 128k で CPU オフロード、GPU 内上限は 65,536〜98,303 の間)。要件書 L69 の「20B は 128k まで VRAM 内完結」は本機では成立しない | **対応済み (本 PR)**。要件書の VRAM 表・構成表・採用モデル表を実測値に訂正した (`docs/localllmrequirements.md` L64 / L74-L76 / L81 / L93) |
+| ~~MEDIUM~~ | 要件書の生成速度と実測が乖離 (14B: 84.3 → 61.5 t/s、20B: 57.5 → 134.3 t/s) | **対応済み (本 PR)**。要件書の採用モデル表を実測値に置き換え、記載の無かった 8B (104.6 t/s) も追記した |
+| ~~INFO~~ | `gpt-oss-20b` の `max_context_tokens` はカタログ上 131072 だが、本機で GPU 内に収まるのは 65,536 まで。プロファイル定義で上限を分けるべきか | **対応済み (本 PR) / 分けるのは不要と結論**。GPU 常駐上限は同居する埋め込み・リランカーの有無に依存するため、モデル単位の定数では表せない。プロファイル単位の `vram.budget_gib` (既定 14.0) で表現する (**D-12**)。`max_context_tokens` はモデル自身の上限のまま 131072 を維持する |
+
+> **本 PR で併せて解消した既存 finding** (上の一覧は未更新のまま残す。再スキャン時に重複しないための注記):
+> `F-1-006` (ChatResult に prompt/eval 分離の受け皿が無い) は `ChatTimings` の追加で解消 (**D-13**)。
+> `F-2-003` (`runtime.kind` が挙動に分岐していない) は `create_chat_client` の追加で解消 (**D-10**)。

@@ -20,7 +20,7 @@ import pytest
 from conftest import RecordingTransport, write_config_variant
 
 from llmkit.bootstrap import bootstrap
-from llmkit.client import ChatMessage, OpenAICompatibleClient
+from llmkit.client import ChatMessage, create_chat_client
 from llmkit.config import load_config
 from llmkit.errors import RuntimeUnavailableError, VramBudgetExceededError
 
@@ -48,6 +48,9 @@ def test_l294_model_change_alone_switches_the_target() -> None:
 
     呼び出しコードは 1 行も変えず、``generation.model`` だけを差し替えると
     送出される ``model`` (= ModelSpec.served_name) が変わる。
+
+    クライアントは ``create_chat_client`` で作る。bootstrap / CLI が実際に通る
+    経路 (既定の ``kind = "ollama"`` ならネイティブ ``/api/chat``) で測るため。
     """
     base = load_config(DEFAULT_CONFIG)
     switched = dataclasses.replace(
@@ -59,7 +62,7 @@ def test_l294_model_change_alone_switches_the_target() -> None:
         recorder = RecordingTransport()
         with recorder.client() as http_client:
             # ここから下は 2 回とも完全に同一のコード。
-            client = OpenAICompatibleClient(config, http_client=http_client)
+            client = create_chat_client(config, http_client=http_client)
             client.chat([ChatMessage(role="user", content="こんにちは")])
         payload: object = json.loads(recorder.requests[0].content)
         assert isinstance(payload, dict)
@@ -107,8 +110,8 @@ def test_l296_oversized_profile_warns_and_stops(
     config_path = write_config_variant(
         tmp_path,
         {
-            "budget_gib = 16.0": "budget_gib = 12.0",
             'active_profile = "rag_default"': 'active_profile = "oversized"',
+            "context_tokens = 16384": "context_tokens = 131072",
         },
     )
     recorder = RecordingTransport()

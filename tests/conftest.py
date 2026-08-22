@@ -47,6 +47,24 @@ SUCCESS_PAYLOAD: dict[str, object] = {
     "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
 }
 
+#: 正常な Ollama ネイティブ /api/chat 応答 (stream=false)。SUCCESS_PAYLOAD と
+#: 同じ内容を、ネイティブ形状で表したもの。
+NATIVE_SUCCESS_PAYLOAD: dict[str, object] = {
+    "model": "qwen3:14b-q4_K_M",
+    "created_at": "2026-08-22T00:00:00.000000000Z",
+    "message": {"role": "assistant", "content": "テスト応答"},
+    "done": True,
+    "done_reason": "stop",
+    "total_duration": 1_600_000_000,
+    "prompt_eval_count": 11,
+    "prompt_eval_duration": 550_000_000,
+    "eval_count": 7,
+    "eval_duration": 1_000_000_000,
+}
+
+#: ネイティブ経路の判定に使うパス。runtime.kind = "ollama" の送信先。
+NATIVE_CHAT_PATH = "/api/chat"
+
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
@@ -160,6 +178,14 @@ class RecordingTransport:
 
 
 def _default_handler(request: httpx.Request) -> httpx.Response:
+    """送信先パスに合わせた正常応答を返す。
+
+    ネイティブ ``/api/chat`` と OpenAI 互換 ``/chat/completions`` では応答形状が
+    違うため、URL で振り分ける (ここで分岐しないと、ネイティブ経路のテストが
+    OpenAI 形状の応答を受け取って UpstreamError になる)。
+    """
+    if request.url.path.endswith(NATIVE_CHAT_PATH):
+        return httpx.Response(200, json=NATIVE_SUCCESS_PAYLOAD)
     return httpx.Response(200, json=SUCCESS_PAYLOAD)
 
 

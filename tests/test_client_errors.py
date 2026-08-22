@@ -152,10 +152,10 @@ def test_out_of_memory_body_maps_to_out_of_memory_error(body: str) -> None:
 
 def test_context_length_400_maps_to_context_length_error() -> None:
     base = load_config(DEFAULT_CONFIG)
-    # qwen3-14b の max_context_tokens は 16384。要求値と上限を別の値にして
-    # 「どちらの数値もメッセージに出ている」ことを区別できるようにする。
+    # qwen3-14b の max_context_tokens は 32768 (Phase 0 実測で較正)。要求値と上限を
+    # 別の値にして「どちらの数値もメッセージに出ている」ことを区別できるようにする。
     config = dataclasses.replace(
-        base, generation=dataclasses.replace(base.generation, context_tokens=32768)
+        base, generation=dataclasses.replace(base.generation, context_tokens=65536)
     )
 
     with pytest.raises(ContextLengthError) as excinfo:
@@ -165,8 +165,8 @@ def test_context_length_400_maps_to_context_length_error() -> None:
         )
 
     message = str(excinfo.value)
+    assert "65536" in message
     assert "32768" in message
-    assert "16384" in message
 
 
 def test_context_length_400_for_passthrough_model_does_not_claim_a_fake_limit(

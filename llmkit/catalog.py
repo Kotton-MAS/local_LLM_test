@@ -1,10 +1,12 @@
 """モデルカタログ (静的テーブル)。
 
-VRAM 見積りの唯一の出典は ``docs/localllmrequirements.md`` L60-L83 の表であり、
-``nvidia-smi`` や実測値を参照しない (D-01)。数値はすべて **GiB** で持つ (D-03)。
+VRAM 見積りの唯一の出典はこの静的テーブルであり、実行時に ``nvidia-smi`` や
+実測値を参照しない (D-01)。数値はすべて **GiB** で持つ (D-03)。
 
-初期値はすべて `(仮)` = Phase 0 の実測で更新する前提。更新するときは
-``source_note`` に実測日と出典を書き換えること。
+生成 3 モデルの値は ``docs/phase0-vram-measurements.md`` (2026-08-22 実測) の
+線形フィット結果で較正済み。埋め込み・リランカーは取得不能のため `(仮)` のまま
+残す (``source_note`` に理由を明記する)。更新するときは ``source_note`` に実測日と
+出典を書くこと。
 """
 
 from __future__ import annotations
@@ -62,12 +64,13 @@ _SPECS: tuple[ModelSpec, ...] = (
         served_name="qwen3:14b-q4_K_M",
         role="generation",
         quantization="Q4_K",
-        weights_gib=9.0,
-        kv_gib_per_1k_tokens=0.10,
-        max_context_tokens=16384,
+        weights_gib=7.81,
+        kv_gib_per_1k_tokens=0.1575,
+        max_context_tokens=32768,
         source_note=(
-            "(仮) 要件書 L60-L83「12〜14B ≈ 8〜9GB」/ コンテキスト 16k。"
-            "Phase 0 の実測で更新する"
+            "実測 2026-08-22 / docs/phase0-vram-measurements.md。"
+            "num_ctx=4096/16384/32768 の 3 点 (すべて 100% GPU) を線形フィットし、"
+            "オーバーヘッド 0.8 GiB を仮定して重みを分離した"
         ),
     ),
     ModelSpec(
@@ -75,12 +78,14 @@ _SPECS: tuple[ModelSpec, ...] = (
         served_name="gpt-oss:20b",
         role="generation",
         quantization="MXFP4",
-        weights_gib=11.5,
-        kv_gib_per_1k_tokens=0.004,
+        weights_gib=11.32,
+        kv_gib_per_1k_tokens=0.0244,
         max_context_tokens=131072,
         source_note=(
-            "(仮) 要件書 L60-L83「20B MXFP4 ≈ 12〜13GB / 128k コンテキストまで "
-            "VRAM 内で完結」。Phase 0 の実測で更新する"
+            "実測 2026-08-22 / docs/phase0-vram-measurements.md。"
+            "num_ctx=32768/65536 の 2 点 (100% GPU) を線形フィットし、"
+            "オーバーヘッド 0.8 GiB を仮定して重みを分離した。"
+            "GPU 常駐上限は 65,536〜98,303 の間 (98,304 で CPU オフロード)"
         ),
     ),
     ModelSpec(
@@ -88,12 +93,13 @@ _SPECS: tuple[ModelSpec, ...] = (
         served_name="qwen3:8b-q4_K_M",
         role="generation",
         quantization="Q4_K",
-        weights_gib=4.5,
-        kv_gib_per_1k_tokens=0.08,
+        weights_gib=4.18,
+        kv_gib_per_1k_tokens=0.1425,
         max_context_tokens=32768,
         source_note=(
-            "(仮) 要件書 L60-L83「7〜8B ≈ 4〜5GB」。最大コンテキストは要件書に"
-            "記載がなく仮置き。Phase 0 の実測で更新する"
+            "実測 2026-08-22 / docs/phase0-vram-measurements.md。"
+            "num_ctx=8192/16384/32768 の 3 点 (すべて 100% GPU) を線形フィットし、"
+            "オーバーヘッド 0.8 GiB を仮定して重みを分離した"
         ),
     ),
     ModelSpec(
@@ -105,9 +111,9 @@ _SPECS: tuple[ModelSpec, ...] = (
         kv_gib_per_1k_tokens=0.0,
         max_context_tokens=8192,
         source_note=(
-            "(仮) 要件書 L99「ruri-v3-310m を初期採用」。"
-            "310M パラメータ x 2 byte から算出。"
-            "served_name と最大コンテキストは Phase 0 で確定する"
+            "(仮) 取得不能: GGUF 非提供のため ollama pull できない "
+            "(Phase 0 実測で確認)。weights_gib は 310M パラメータ x 2 byte "
+            "からの未実測の仮値。方式は Phase 3 で決定する"
         ),
     ),
     ModelSpec(
@@ -119,8 +125,10 @@ _SPECS: tuple[ModelSpec, ...] = (
         kv_gib_per_1k_tokens=0.0,
         max_context_tokens=512,
         source_note=(
-            "(仮) 要件書 L115「Ruri Reranker を初期採用」。重み・served_name・"
-            "最大コンテキストはいずれも仮置き。Phase 0 の実測で更新する"
+            "(仮) 取得不能: GGUF 非提供のため ollama pull できない "
+            "(Phase 0 実測で確認。Ollama にリランキング API 自体が無い)。"
+            "重み・served_name・最大コンテキストはいずれも未実測の仮値。"
+            "方式は Phase 3 で決定する"
         ),
     ),
 )

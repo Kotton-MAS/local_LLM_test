@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import write_config_variant
 
 from llmkit.catalog import ModelSpec, get_model_spec
 from llmkit.config import AppConfig, GenerationParams, VramConfig, load_config
@@ -32,8 +33,18 @@ from llmkit.vram import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
 
-# 要件書 L74-L76 の構成表。帯は仕様書 §4 T2 の受け入れ基準。
-REQUIREMENTS_BAND_GIB = (12.0, 13.5)
+#: 較正後の出荷プロファイル見積り (GiB)。出典は docs/phase0-vram-measurements.md
+#: の実測フィット値であり、要件書の帯ではない。
+#: (プロファイル名, context_tokens, 合計 GiB, 既定予算 14.0 に収まるか)
+SHIPPED_PROFILE_ESTIMATES: tuple[tuple[str, int, float, bool], ...] = (
+    ("rag_default", 16384, 12.63, True),
+    ("long_context", 65536, 13.68, True),
+    ("long_context", 131072, 15.24, False),
+    ("oversized", 131072, 16.74, False),
+)
+
+#: 実測でオフロードが始まらない増分の上限として設定した既定予算 (D-12)。
+DEFAULT_BUDGET_GIB = 14.0
 
 # テスト専用のダミー。予算ガード本体の検証をカタログ値のキャリブレーションから切り離す。
 HUGE_MODEL = ModelSpec(
@@ -177,29 +188,34 @@ def test_estimate_follows_the_documented_formula(config: AppConfig) -> None:
     assert estimate.runtime_overhead_gib == pytest.approx(0.8)
     assert estimate.total_gib == pytest.approx(expected_weights + expected_kv + 0.8)
     assert estimate.weights_gib == {
-        "qwen3-14b": pytest.approx(9.0),
+        "qwen3-14b": pytest.approx(7.81),
         "ruri-v3-310m": pytest.approx(0.7),
         "ruri-reranker": pytest.approx(0.8),
     }
 
 
-def test_documented_profiles_match_requirements_table(config: AppConfig) -> None:
-    """要件書 L74-L76 の構成1 / 構成2 / 構成3 の再現 (E7 のゴールデン帯)。"""
-    low, high = REQUIREMENTS_BAND_GIB
+@pytest.mark.parametrize(
+    ("profile_name", "context_tokens", "expected_total_gib", "expected_within_budget"),
+    SHIPPED_PROFILE_ESTIMATES,
+    ids=[f"{name}@{tokens}" for name, tokens, _, _ in SHIPPED_PROFILE_ESTIMATES],
+)
+def test_shipped_profiles_match_phase0_measurements(
+    config: AppConfig,
+    profile_name: str,
+    context_tokens: int,
+    expected_total_gib: float,
+    expected_within_budget: bool,
+) -> None:
+    """E7: 出荷プロファイルの見積り合計を実測由来の値で固定する。
 
-    configuration_1 = estimate_profile(config, "rag_default", context_tokens=16384)
-    configuration_2 = estimate_profile(config, "long_context", context_tokens=131072)
-    configuration_3 = estimate_profile(config, "oversized", context_tokens=131072)
+    出典は要件書の帯ではなく docs/phase0-vram-measurements.md の実測フィット
+    (``long_context @32768 = 12.90`` と ``@65536 = 13.68`` は実測値と一致する)。
+    """
+    estimate = estimate_profile(config, profile_name, context_tokens=context_tokens)
 
-    # 構成1: 約 12〜13GB
-    assert low <= configuration_1.total_gib <= high
-    # 構成2: 約 13GB。予算 16.0 GiB に収まる
-    assert low <= configuration_2.total_gib <= high
-    assert configuration_2.within_budget
-    assert configuration_2.budget_gib == pytest.approx(16.0)
-    # 構成3 (非推奨): 構成1・構成2 のいずれよりも大きい
-    assert configuration_3.total_gib > configuration_1.total_gib
-    assert configuration_3.total_gib > configuration_2.total_gib
+    assert estimate.budget_gib == pytest.approx(DEFAULT_BUDGET_GIB)
+    assert estimate.total_gib == pytest.approx(expected_total_gib, abs=0.005)
+    assert estimate.within_budget is expected_within_budget
 
 
 def test_context_tokens_change_estimate(config: AppConfig) -> None:
@@ -269,8 +285,8 @@ def test_synthetic_oversized_profile_raises_with_full_breakdown(
     expected_total = 20.0 + 0.8
     assert error.profile_name == "synthetic_oversized"
     assert error.total_gib == pytest.approx(expected_total)
-    assert error.budget_gib == pytest.approx(16.0)
-    assert error.excess_gib == pytest.approx(expected_total - 16.0)
+    assert error.budget_gib == pytest.approx(14.0)
+    assert error.excess_gib == pytest.approx(expected_total - 14.0)
     assert error.kv_cache_gib == pytest.approx(0.0)
     assert error.runtime_overhead_gib == pytest.approx(0.8)
     assert error.weights_gib == {"test-huge-20gib": pytest.approx(20.0)}
@@ -278,31 +294,53 @@ def test_synthetic_oversized_profile_raises_with_full_breakdown(
     message = str(error)
     assert "synthetic_oversized" in message  # プロファイル名
     assert "20.80" in message  # 合計値
-    assert "16.00" in message  # 予算値
-    assert "4.80" in message  # 超過量
+    assert "14.00" in message  # 予算値
+    assert "6.80" in message  # 超過量
 
 
 def test_budget_threshold_changes_verdict(config: AppConfig) -> None:
     """E4: 同一プロファイル・同一カタログで budget_gib だけを変えると判定が反転する。
 
-    rag_default の見積りは 12.90 GiB (= 10.5 + 1.6 + 0.8)。仕様書 §4 T2 は
-    「13.0 に下げると超過側に転ぶ」と書いているが 12.90 <= 13.0 のため反転しない。
-    カタログ値を勝手に大きくしない (仕様書 §7 リスク2) ため、超過側の閾値は
-    見積り値の直下である 12.5 を用いる。詳細は仕様書 §4 T2 の追記を参照。
+    較正後の rag_default @16384 の見積りは 12.63 GiB (= 9.31 + 2.52 + 0.8)。
+    既定予算 14.0 では収まり、見積り値の直下 12.0 に下げると 0.63 GiB 超過する。
     """
     profile = resolve_profile(config, "rag_default")
     baseline = estimate_resolved_profile(profile, config, context_tokens=16384)
-    assert baseline.total_gib == pytest.approx(12.9)
+    assert baseline.total_gib == pytest.approx(12.63)
 
-    generous = with_vram(config, budget_gib=16.0)
-    strict = with_vram(config, budget_gib=12.5)
+    generous = with_vram(config, budget_gib=14.0)
+    strict = with_vram(config, budget_gib=12.0)
 
     assert check_budget(profile, generous, context_tokens=16384).within_budget
 
     with pytest.raises(VramBudgetExceededError) as excinfo:
         check_budget(profile, strict, context_tokens=16384)
 
-    assert excinfo.value.excess_gib == pytest.approx(0.4)
+    assert excinfo.value.excess_gib == pytest.approx(0.63)
+
+
+def test_budget_reflects_the_measured_gpu_resident_ceiling(config: AppConfig) -> None:
+    """D-12 guard: 既定予算が「実測でオフロードが始まらない増分の上限」である。
+
+    実測 (docs/phase0-vram-measurements.md) では gpt-oss-20b 単体は num_ctx=65,536
+    (合計 13.68 GiB) まで 100% GPU、num_ctx=98,304 (見積り 14.46 GiB) で CPU
+    オフロードが発生した。GPU 常駐上限はモデル単位の定数ではなく
+    ``vram.budget_gib`` の予算判定で表現する。
+    """
+    profile = resolve_profile(config, "long_context")
+
+    assert config.vram.budget_gib == pytest.approx(DEFAULT_BUDGET_GIB)
+
+    # 100% GPU だった点は通る
+    resident = check_budget(profile, config, context_tokens=65536)
+    assert resident.total_gib == pytest.approx(13.68, abs=0.005)
+    assert resident.within_budget
+
+    # オフロードが観測された点、およびそれより大きい点は停止側になる
+    for context_tokens, expected_total_gib in ((98304, 14.46), (131072, 15.24)):
+        with pytest.raises(VramBudgetExceededError) as excinfo:
+            check_budget(profile, config, context_tokens=context_tokens)
+        assert excinfo.value.total_gib == pytest.approx(expected_total_gib, abs=0.005)
 
 
 def test_budget_check_is_skipped_for_remote_runtimes(config: AppConfig) -> None:
@@ -371,7 +409,7 @@ def test_estimate_is_pure_and_needs_no_gpu(
     assert first == second
 
 
-def test_all_vram_values_are_gib() -> None:
+def test_all_vram_values_are_gib(tmp_path: Path) -> None:
     """D-03: VRAM に関する数値は GiB に統一し、GB / MB / MiB を混在させない。"""
     non_gib_units = ("_gb", "_mb", "_mib", "_kb", "_kib", "byte", "gigabyte")
     float_fields = {
@@ -399,8 +437,15 @@ def test_all_vram_values_are_gib() -> None:
     estimate = estimate_profile(load_config(DEFAULT_CONFIG), "rag_default")
     assert isinstance(estimate.excess_gib, float)
 
-    # 要件書の「16GB」はコード上 16.0 GiB として扱う
-    assert load_config(DEFAULT_CONFIG).vram.budget_gib == pytest.approx(16.0)
+    # 要件書の「16GB」はコード上 16.0 GiB として読める (GB へ換算しない)
+    written_as_16 = write_config_variant(
+        tmp_path, {"budget_gib = 14.0": "budget_gib = 16.0"}
+    )
+    assert load_config(written_as_16).vram.budget_gib == pytest.approx(16.0)
+
+    # 出荷設定の予算はカード容量 16376 MiB = 15.99 GiB を超えない。
+    # GB と取り違えて 17.17 を書くとここで落ちる。
+    assert load_config(DEFAULT_CONFIG).vram.budget_gib <= 15.99
 
     # 生成パラメータ側にメモリ単位のフィールドを紛れ込ませない
     for field in dataclasses.fields(GenerationParams):

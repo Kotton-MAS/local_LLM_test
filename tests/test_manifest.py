@@ -38,6 +38,7 @@ from llmkit.vram import estimate_resolved_profile, resolve_profile
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
 EXTERNAL_CONFIG = REPO_ROOT / "configs" / "external_openai.toml"
+COMPAT_CONFIG = REPO_ROOT / "configs" / "ollama_openai_compat.toml"
 
 API_KEY = "sk-test-do-not-leak-0123456789"
 
@@ -81,7 +82,17 @@ EXPECTED_SECTION_KEYS: Mapping[str, frozenset[str]] = {
             "seed",
         }
     ),
-    "runtime": frozenset({"kind", "base_url", "is_local", "timeout_s", "api_key_env"}),
+    "runtime": frozenset(
+        {
+            "kind",
+            "base_url",
+            "is_local",
+            "timeout_s",
+            "api_key_env",
+            "api_style",
+            "endpoint_url",
+        }
+    ),
 }
 EXPECTED_MODEL_KEYS = frozenset({"model_id", "served_name", "role", "quantization"})
 
@@ -265,6 +276,51 @@ def test_manifest_generation_covers_all_generation_params() -> None:
     fields = {field.name for field in dataclasses.fields(generation)}
 
     assert set(EXPECTED_SECTION_KEYS["generation"]) == fields
+
+
+# --------------------------------------------------------------------------
+# 配線 (E9): runtime.kind が api_style と送信先を決める
+# --------------------------------------------------------------------------
+
+
+def test_runtime_kind_changes_the_recorded_api_style_and_endpoint() -> None:
+    """E9: ``runtime.kind`` を変えると api_style と endpoint_url の両方が変わる。
+
+    ``kind`` が「マニフェストに記録されるだけの飾り」に戻ると (F-2-003 の再発)、
+    2 つの kind で同じ api_style / endpoint_url が記録され、このテストが落ちる。
+    """
+    base = load_config(DEFAULT_CONFIG)
+    assert base.runtime.kind == "ollama"
+    compat = dataclasses.replace(
+        base, runtime=dataclasses.replace(base.runtime, kind="openai_compatible")
+    )
+
+    native_runtime = section(manifest_dict(base), "runtime")
+    compat_runtime = section(manifest_dict(compat), "runtime")
+
+    assert native_runtime["kind"] == "ollama"
+    assert native_runtime["api_style"] == "ollama_native"
+    assert native_runtime["endpoint_url"] == "http://localhost:11434/api/chat"
+
+    assert compat_runtime["kind"] == "openai_compatible"
+    assert compat_runtime["api_style"] == "openai_compatible"
+    assert (
+        compat_runtime["endpoint_url"] == "http://localhost:11434/v1/chat/completions"
+    )
+
+    # base_url は 1 文字も変えていない。変わったのは kind から導出される 2 値だけ。
+    assert native_runtime["base_url"] == compat_runtime["base_url"]
+    assert native_runtime["api_style"] != compat_runtime["api_style"]
+    assert native_runtime["endpoint_url"] != compat_runtime["endpoint_url"]
+
+
+def test_shipped_configs_record_the_route_they_select() -> None:
+    """設定ファイルの差し替えだけで記録される経路が変わる (E9 の出荷設定版)。"""
+    native = section(manifest_dict(load_config(DEFAULT_CONFIG)), "runtime")
+    compat = section(manifest_dict(load_config(COMPAT_CONFIG)), "runtime")
+
+    assert native["endpoint_url"] == "http://localhost:11434/api/chat"
+    assert compat["endpoint_url"] == "http://localhost:11434/v1/chat/completions"
 
 
 def test_manifest_vram_matches_the_estimate() -> None:

@@ -1,4 +1,8 @@
-"""llmkit: 設定駆動の OpenAI 互換推論クライアント層 (L2)。
+"""llmkit: 設定駆動の推論クライアント層 (L2)。
+
+送出するワイヤプロトコルは ``runtime.kind`` で選ぶ (Ollama ネイティブ ``/api/chat``
+または OpenAI 互換 ``/chat/completions``、D-10)。層の共通境界はワイヤプロトコル
+ではなく :class:`ChatClient` Protocol である。
 
 L3 (上位アプリ) はこのモジュールが再エクスポートする公開シンボルのみを import する。
 推論ランタイム固有の型 (httpx / 生 JSON) は公開 API に露出させない。
@@ -19,12 +23,18 @@ from llmkit.catalog import (
     resolve_model_spec,
 )
 from llmkit.client import (
+    ApiStyle,
     ChatClient,
     ChatMessage,
     ChatResult,
     ChatRole,
+    ChatTimings,
+    OllamaNativeClient,
     OpenAICompatibleClient,
     TokenUsage,
+    api_style_for,
+    create_chat_client,
+    endpoint_url_for,
 )
 from llmkit.config import (
     AppConfig,
@@ -72,12 +82,14 @@ __all__ = [
     "DEFAULT_OUTPUT_DIR",
     "MODEL_CATALOG",
     "SCHEMA_VERSION",
+    "ApiStyle",
     "AppConfig",
     "BootstrapResult",
     "ChatClient",
     "ChatMessage",
     "ChatResult",
     "ChatRole",
+    "ChatTimings",
     "ConfigError",
     "ContextLengthError",
     "GenerationParams",
@@ -90,6 +102,7 @@ __all__ = [
     "ModelNotFoundError",
     "ModelRole",
     "ModelSpec",
+    "OllamaNativeClient",
     "OpenAICompatibleClient",
     "OutOfMemoryError",
     "ProfileConfig",
@@ -103,10 +116,13 @@ __all__ = [
     "VramBudgetExceededError",
     "VramConfig",
     "VramEstimate",
+    "api_style_for",
     "bootstrap",
     "build_manifest",
     "check_budget",
     "compute_config_sha256",
+    "create_chat_client",
+    "endpoint_url_for",
     "estimate_profile",
     "estimate_resolved_profile",
     "get_model_spec",

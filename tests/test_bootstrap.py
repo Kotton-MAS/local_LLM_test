@@ -71,8 +71,8 @@ def test_bootstrap_logs_estimated_vram_usage(
 
     assert info_messages, "INFO ログが 1 件も出ていない"
     assert "rag_default" in combined
-    assert "12.90" in combined
-    assert "16.00" in combined
+    assert "12.63" in combined
+    assert "14.00" in combined
 
 
 def test_bootstrap_log_follows_the_selected_profile(
@@ -93,8 +93,8 @@ def test_bootstrap_log_follows_the_selected_profile(
         )
 
     assert "lightweight" in caplog.text
-    # qwen3-8b 4.5 + KV 0.08 * 16 + overhead 0.8 = 6.58
-    assert "6.58" in caplog.text
+    # qwen3-8b 4.18 + KV 0.1425 * 16 + overhead 0.8 = 7.26
+    assert "7.26" in caplog.text
 
 
 # --------------------------------------------------------------------------
@@ -107,15 +107,14 @@ def test_oversized_profile_warns_and_aborts_without_http(
 ) -> None:
     """D-04 guard: 予算超過で (a) WARNING (b) 例外 (c) HTTP 0 回 の 3 つを満たす。
 
-    カタログ値では構成3 が 16 GiB を超えないため (仕様書 T2 の食い違い参照)、
-    予算超過は ``vram.budget_gib`` を下げた一時設定で作る。判定に効いているのは
-    「見積り > 予算」という関係そのもの。
+    較正後は構成3 (oversized) を 131,072 トークンで使うと見積り 16.74 GiB となり、
+    **既定の ``vram.budget_gib`` (14.0) のまま**超過する。予算を下げる回避は使わない。
     """
     config_path = write_config_variant(
         tmp_path,
         {
-            "budget_gib = 16.0": "budget_gib = 12.0",
             'active_profile = "rag_default"': 'active_profile = "oversized"',
+            "context_tokens = 16384": "context_tokens = 131072",
         },
     )
     requests: list[httpx.Request] = []
@@ -137,7 +136,7 @@ def test_oversized_profile_warns_and_aborts_without_http(
     # (b) VramBudgetExceededError が送出され、内訳を保持している
     error = excinfo.value
     assert error.profile_name == "oversized"
-    assert error.budget_gib == pytest.approx(12.0)
+    assert error.budget_gib == pytest.approx(14.0)
     assert error.total_gib > error.budget_gib
     assert error.excess_gib == pytest.approx(error.total_gib - error.budget_gib)
 
@@ -155,14 +154,18 @@ def test_lowering_the_budget_alone_flips_bootstrap_from_ok_to_abort(
     requests: list[httpx.Request] = []
     ok_path = write_config_variant(
         tmp_path,
-        {'active_profile = "rag_default"': 'active_profile = "oversized"'},
+        {
+            "budget_gib = 14.0": "budget_gib = 17.0",
+            'active_profile = "rag_default"': 'active_profile = "oversized"',
+            "context_tokens = 16384": "context_tokens = 131072",
+        },
         name="ok.toml",
     )
     ng_path = write_config_variant(
         tmp_path,
         {
-            "budget_gib = 16.0": "budget_gib = 12.0",
             'active_profile = "rag_default"': 'active_profile = "oversized"',
+            "context_tokens = 16384": "context_tokens = 131072",
         },
         name="ng.toml",
     )
@@ -187,7 +190,7 @@ def test_remote_runtime_skips_the_budget_guard(
     config_path = write_config_variant(
         tmp_path,
         {
-            "budget_gib = 16.0": "budget_gib = 1.0",
+            "budget_gib = 14.0": "budget_gib = 1.0",
             "is_local = true": "is_local = false",
         },
     )
@@ -221,7 +224,7 @@ def test_bootstrap_returns_usable_client_and_writes_manifest(tmp_path: Path) -> 
     assert len(requests) == 1
     assert result.manifest_path is not None
     assert result.manifest_path.exists()
-    assert result.endpoint_url == "http://localhost:11434/v1/chat/completions"
+    assert result.endpoint_url == "http://localhost:11434/api/chat"
     assert result.served_name == "qwen3:14b-q4_K_M"
 
 
@@ -331,7 +334,7 @@ def test_cli_doctor_succeeds_against_a_reachable_runtime(tmp_path: Path) -> None
 
     assert code == 0, err
     assert "rag_default" in out
-    assert "12.90" in out
+    assert "12.63" in out
     assert "qwen3:14b-q4_K_M" in out
     assert len(requests) == 1
     assert len(list(output_dir.glob("*.json"))) == 1
@@ -366,8 +369,8 @@ def test_cli_doctor_exits_1_and_makes_no_request_when_budget_exceeded(
     config_path = write_config_variant(
         tmp_path,
         {
-            "budget_gib = 16.0": "budget_gib = 12.0",
             'active_profile = "rag_default"': 'active_profile = "oversized"',
+            "context_tokens = 16384": "context_tokens = 131072",
         },
     )
     requests: list[httpx.Request] = []

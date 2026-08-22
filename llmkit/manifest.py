@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from llmkit.catalog import ModelRole
+from llmkit.client import api_style_for, endpoint_url_for
 from llmkit.config import AppConfig
 from llmkit.errors import ConfigError
 from llmkit.vram import ResolvedProfile, VramEstimate
@@ -132,13 +133,20 @@ class ManifestGeneration:
 
 @dataclass(frozen=True, slots=True)
 class ManifestRuntime:
-    """接続先ランタイムの記録。``api_key_env`` は環境変数「名」のみ (D-05)。"""
+    """接続先ランタイムの記録。``api_key_env`` は環境変数「名」のみ (D-05)。
+
+    ``kind`` を記録するだけでは「どの経路で送ったか」が後から分からないため、
+    ``kind`` から導出した ``api_style`` (ワイヤプロトコル) と、実際の送信先
+    ``endpoint_url`` も記録する (D-10 / D-11、仕様書 §5 有効性観点 E9)。
+    """
 
     kind: str
     base_url: str
     is_local: bool
     timeout_s: float
     api_key_env: str
+    api_style: str
+    endpoint_url: str
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -147,6 +155,8 @@ class ManifestRuntime:
             "is_local": self.is_local,
             "timeout_s": self.timeout_s,
             "api_key_env": self.api_key_env,
+            "api_style": self.api_style,
+            "endpoint_url": self.endpoint_url,
         }
 
 
@@ -229,6 +239,7 @@ def build_manifest(
     moment = started_at if started_at is not None else datetime.now(UTC)
     generation = config.generation
     runtime = config.runtime
+    api_style = api_style_for(runtime.kind)
     return RunManifest(
         schema_version=SCHEMA_VERSION,
         run_id=run_id if run_id is not None else uuid.uuid4().hex[:12],
@@ -268,6 +279,8 @@ def build_manifest(
             is_local=runtime.is_local,
             timeout_s=runtime.timeout_s,
             api_key_env=runtime.api_key_env,
+            api_style=api_style,
+            endpoint_url=endpoint_url_for(runtime.base_url, api_style),
         ),
         config_path=str(config_path),
         config_sha256=compute_config_sha256(config_path),

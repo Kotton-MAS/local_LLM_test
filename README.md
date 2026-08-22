@@ -72,7 +72,8 @@ VS Code で **Dev Containers: Reopen in Container** を実行すると、Docker 
 ## llmkit (Phase 1: 推論クライアント層)
 
 設定ファイルだけで推論先モデル・エンドポイント・VRAM プロファイルを切り替えられる
-OpenAI 互換クライアント層です。仕様は `docs/plans/2026-08-22-phase1-inference-client-l2.md`。
+推論クライアント層です。仕様は `docs/plans/2026-08-22-phase1-inference-client-l2.md` と、
+Phase 0 実測にもとづく追補 `docs/plans/2026-08-22-phase1-calibration-and-native-chat.md`。
 
 ### まず `doctor` を実行する
 
@@ -96,14 +97,32 @@ uv run python -m llmkit.cli chat "日本語で自己紹介して" --config confi
 VRAM 予算を超えるプロファイルを指定した場合は、**HTTP を 1 回も発行せずに**
 警告して停止します (要件書 L296 / 決定 D-04)。
 
+### 2 つの API 経路 (`runtime.kind`)
+
+送出するワイヤプロトコルは `runtime.kind` で決まります。分岐は `create_chat_client` の
+1 か所だけにあり、上位層は `ChatClient` Protocol にしか依存しません (決定 D-10)。
+
+| `runtime.kind` | 送信先 | `context_tokens` の反映 |
+|---|---|---|
+| `ollama` (既定) | ネイティブ `{base_url の /v1 を除去}/api/chat` | **される** (`options.num_ctx`) |
+| `openai_compatible` | OpenAI 互換 `{base_url}/chat/completions` | **されない** (Ollama が無視する) |
+
+Phase 0 実測で、Ollama の OpenAI 互換エンドポイントは `options.num_ctx` を無視し
+`ollama ps` の CONTEXT が既定の 4096 のままになることを確認しています
+(`docs/phase0-vram-measurements.md`)。**ローカル Ollama では `kind = "ollama"` を使ってください。**
+ネイティブ側の URL は `runtime.base_url` から導出するため、設定キーは増えません (決定 D-11)。
+
 ### 設定ファイル
 
 | ファイル | 用途 |
 |---|---|
-| `configs/default.toml` | ローカル Ollama (構成1 = 生成 + 埋め込み + リランカー) |
-| `configs/external_openai.toml` | 外部 OpenAI 互換 API への切り替え例 |
+| `configs/default.toml` | **既定。** ローカル Ollama にネイティブ `/api/chat` で接続 (構成1 = 生成 + 埋め込み + リランカー) |
+| `configs/ollama_openai_compat.toml` | 同じローカル Ollama に OpenAI 互換 `/v1/chat/completions` で接続。`default.toml` との差は `kind` の 1 行だけで、2 経路の A/B 比較用 |
+| `configs/external_openai.toml` | 外部 OpenAI 互換 API への切り替え例 (`is_local = false` で VRAM 予算ガードは無効) |
 
 - 推論先モデルの切り替えは `[generation] model` の変更**だけ**で済みます (コード変更不要)。
+- `vram.budget_gib` の既定は **14.0 GiB** です。カード容量 (16 GiB) ではなく、
+  実測で CPU オフロードが始まらない「増分」の上限です (決定 D-12)。
 - **api_key の値は設定ファイルに書きません。** 環境変数「名」を `runtime.api_key_env` に書き、
   値は `export LLMKIT_API_KEY=...` で渡します (決定 D-05)。値を直接書くと読み込み時に落ちます。
 - VRAM の単位はすべて GiB です (決定 D-03)。
@@ -145,16 +164,18 @@ VRAM 予算を超えるプロファイルを指定した場合は、**HTTP を 1
 │   ├── config.py            # TOML 設定のロードと検証
 │   ├── catalog.py           # モデルカタログ (VRAM 見積りの静的テーブル)
 │   ├── vram.py              # プロファイル解決・見積り・予算判定
-│   ├── client.py            # ChatClient Protocol + OpenAI 互換実装
+│   ├── client.py            # ChatClient Protocol + ネイティブ/OpenAI 互換の 2 実装
 │   ├── manifest.py          # 実行マニフェスト (再現条件の記録)
 │   ├── bootstrap.py         # 起動シーケンス
 │   ├── cli.py               # doctor / chat サブコマンド
 │   └── errors.py            # 対処方法つき例外階層
 ├── configs/
-│   ├── default.toml         # ローカル Ollama 用の設定
+│   ├── default.toml         # ローカル Ollama 用 (ネイティブ /api/chat)
+│   ├── ollama_openai_compat.toml # ローカル Ollama 用 (OpenAI 互換経路。A/B 比較)
 │   └── external_openai.toml # 外部 OpenAI 互換 API 用の設定
 ├── docs/
 │   ├── localllmrequirements.md   # 要件定義 (v2)
+│   ├── phase0-vram-measurements.md # Phase 0 の VRAM 実測記録 (較正の出典)
 │   ├── next-pr-candidates.md     # 未対応の改善候補
 │   ├── plans/               # planner の仕様書
 │   └── adr/                 # architect の設計判断記録

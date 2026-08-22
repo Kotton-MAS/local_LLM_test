@@ -23,7 +23,13 @@ from pathlib import Path
 
 import httpx
 
-from llmkit.client import ChatClient, OpenAICompatibleClient
+from llmkit.catalog import resolve_model_spec
+from llmkit.client import (
+    ChatClient,
+    api_style_for,
+    create_chat_client,
+    endpoint_url_for,
+)
 from llmkit.config import AppConfig, load_config
 from llmkit.errors import VramBudgetExceededError
 from llmkit.manifest import RunManifest, build_manifest, write_manifest
@@ -100,11 +106,21 @@ def bootstrap(
         write_manifest(manifest, output_dir) if write_manifest_file else None
     )
 
-    client = OpenAICompatibleClient(config, http_client=http_client)
+    # ChatClient は Protocol であり endpoint_url / served_name を宣言しないため、
+    # 表示・記録用の 2 値はクライアントからではなく設定から導出する
+    # (マニフェストの api_style / endpoint_url と同じ出典にそろえる)。
+    api_style = api_style_for(config.runtime.kind)
+    endpoint_url = endpoint_url_for(config.runtime.base_url, api_style)
+    served_name = resolve_model_spec(
+        config.generation.model, is_local=config.runtime.is_local
+    ).served_name
+
+    client = create_chat_client(config, http_client=http_client)
     logger.info(
-        "推論クライアントを初期化しました: url=%s model=%s",
-        client.endpoint_url,
-        client.served_name,
+        "推論クライアントを初期化しました: api_style=%s url=%s model=%s",
+        api_style,
+        endpoint_url,
+        served_name,
     )
     return BootstrapResult(
         config=config,
@@ -113,6 +129,6 @@ def bootstrap(
         manifest=manifest,
         manifest_path=manifest_path,
         client=client,
-        endpoint_url=client.endpoint_url,
-        served_name=client.served_name,
+        endpoint_url=endpoint_url,
+        served_name=served_name,
     )

@@ -24,7 +24,7 @@ from typing import TextIO
 import httpx
 
 from llmkit.bootstrap import BootstrapResult, bootstrap
-from llmkit.client import ChatMessage
+from llmkit.client import ChatMessage, ChatResult
 from llmkit.errors import LlmkitError
 
 logger = logging.getLogger(__name__)
@@ -110,10 +110,39 @@ def _report_startup(result: BootstrapResult, stdout: TextIO) -> None:
     _write(stdout, f"設定ハッシュ: {result.manifest.config_sha256}")
     _write(stdout, f"プロファイル: {result.profile.name}")
     _write(stdout, f"VRAM       : {result.estimate.summary()}")
+    _write(
+        stdout,
+        f"API 経路   : {result.manifest.runtime.api_style} "
+        f"(runtime.kind={result.manifest.runtime.kind})",
+    )
     _write(stdout, f"接続先     : {result.endpoint_url}")
     _write(stdout, f"モデル実名 : {result.served_name}")
     if result.manifest_path is not None:
         _write(stdout, f"マニフェスト: {result.manifest_path}")
+
+
+def _speed_summary(chat_result: ChatResult) -> str:
+    """速度指標の表示文字列 (F-4-004 / F-5-001)。
+
+    まず ``measured_tokens_per_second`` (欠測を ``None`` で表す) で計測不能
+    かどうかを判定する。``eval_count`` 欠測などで ``None`` のときは、
+    ``ChatResult.tokens_per_second`` の 0.0 をそのまま出すと「実測 0 t/s」に
+    見えてしまうため、数値の代わりに計測不能である旨を出す (これが唯一の
+    リポジトリ内消費者であり、この判定を通さずに ``tokens_per_second`` を
+    直接表示しない)。
+
+    計測できたときは従来どおり、``tokens_per_second`` (latency_s ベースの
+    壁時計値) を主表示にし、ネイティブ経路で ``timings`` が得られれば
+    ``eval_tokens_per_second`` (Ollama 内部の純粋な生成時間のみが分母) も
+    併記して、両者の差から再ロードの有無を読み手が判別できるようにする。
+    """
+    if chat_result.measured_tokens_per_second is None:
+        return "速度計測不能 (eval_count 欠測)"
+    summary = f"{chat_result.tokens_per_second:.1f} t/s (latency_s ベース)"
+    timings = chat_result.timings
+    if timings is not None and timings.eval_tokens_per_second is not None:
+        summary += f" / eval {timings.eval_tokens_per_second:.1f} t/s"
+    return summary
 
 
 def _run_doctor(
@@ -133,7 +162,7 @@ def _run_doctor(
         stdout,
         f"疎通確認 OK: model={chat_result.model} "
         f"finish_reason={chat_result.finish_reason} "
-        f"{chat_result.tokens_per_second:.1f} t/s",
+        f"{_speed_summary(chat_result)}",
     )
     return EXIT_OK
 
@@ -155,7 +184,7 @@ def _run_chat(
         stdout,
         f"--- {chat_result.usage.completion_tokens} tokens / "
         f"{chat_result.latency_s:.2f} s = "
-        f"{chat_result.tokens_per_second:.1f} t/s "
+        f"{_speed_summary(chat_result)} "
         f"(finish_reason={chat_result.finish_reason})",
     )
     return EXIT_OK

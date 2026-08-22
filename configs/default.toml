@@ -21,7 +21,11 @@ max_output_tokens = 1024
 seed = 0
 
 [vram]
-budget_gib = 16.0
+# 実測 (docs/phase0-vram-measurements.md): 増分 13.68 GiB は 100% GPU、
+# 14.46 GiB 相当 (num_ctx=98,304) で CPU オフロードが発生した。予算はその
+# 区間の内側に置く。カード容量 16 GiB は「増分」の上限ではない
+# (アイドルで 0.60 GiB を使用している)。
+budget_gib = 14.0
 runtime_overhead_gib = 0.8
 active_profile = "rag_default"
 

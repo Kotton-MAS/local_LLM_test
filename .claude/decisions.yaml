@@ -50,3 +50,30 @@
   rule: "Phase 1 の『設定のみで切替』はカタログ登録済み model_id 間、および『ローカルと外部 API の切替』軸に限る。ランタイム固有の served_name (vLLM 等へ渡す実モデル名) を設定側から上書きする手段は Phase 1 には無く、Phase 2 で対応する"
   rationale: "resolve_model_spec は is_local=false かつカタログ未登録の model_id を passthrough で許すが、is_local=true (ローカル実行) では VRAM 見積りの正確性 (D-01) が要件そのものであり、未登録モデルを黙って通すことはできない。ローカルでランタイムを差し替える (例: vLLM に実モデル名 'Qwen/Qwen3-14B-AWQ' を渡す) には現状 llmkit/catalog.py の編集が必要 (F-2-001 で実測確認)。設定側に [models.<id>] 上書き表を導入する恒久対応は別タスク (Phase 2) とし、今回のスコープでは行わない"
   guard_test: "tests/test_catalog.py::test_resolve_model_spec_raises_config_error_for_unregistered_model_when_local"
+
+# 出典: docs/plans/2026-08-22-phase1-calibration-and-native-chat.md §6
+
+- id: D-10
+  rule: "runtime.kind がクライアント実装を選ぶ。kind='ollama' はネイティブ /api/chat、kind='openai_compatible' は /v1/chat/completions を使う。分岐は create_chat_client の 1 か所だけに置く"
+  rationale: "Phase 0 実測で /v1/chat/completions は options.num_ctx を無視することを確認した (16384 / 32768 を送っても ollama ps の CONTEXT は 4096)。コンテキスト長を設定で切り替えるという Phase 1 の前提が OpenAI 互換経路では成立しない。これにより元仕様書 §8 Q-B の決定 (1)『OpenAI 互換のみ』を変更する。層の共通境界はワイヤプロトコルではなく ChatClient Protocol とする。D-09 は変更しない"
+  guard_test: "tests/test_client_factory.py::test_runtime_kind_selects_the_client_implementation"
+
+- id: D-11
+  rule: "ネイティブ経路のエンドポイントは runtime.base_url の末尾 /v1 を 1 セグメントだけ除去して /api/chat を連結して導出する。ネイティブ URL 用の設定キーを追加しない"
+  rationale: "既存の base_url は OpenAI 互換の /v1 を指す前提で configs とテストに固定されており、キーを増やすと『設定のみで切替』の軸が増えて D-09 の整理と衝突する。導出が合わない構成 (ゲートウェイ等) は kind='openai_compatible' を選べば従来どおり動く"
+  guard_test: "tests/test_client_native.py::test_native_endpoint_url_is_derived_from_base_url"
+
+- id: D-12
+  rule: "GPU 常駐上限はモデル単位の定数ではなく vram.budget_gib (プロファイル単位の予算判定) で表現する。budget_gib はカード容量ではなく『実測でオフロードが始まらない増分の上限』であり、本機の既定は 14.0 GiB"
+  rationale: "実測で gpt-oss-20b 単体は合計 13.68 GiB (num_ctx=65536) まで 100% GPU、num_ctx=98304 (見積り 14.46 GiB) で CPU オフロードが発生した。上限は同居する埋め込み・リランカーの有無に依存するため model 単位の max_context_tokens では表せない。カード 16376 MiB = 15.99 GiB のうちアイドルで 0.60 GiB を使用しており、増分の予算 16.0 は原理的に大きすぎる。要件書 L296 の『16GB を超えたら停止』は、より早く停止する本設定でも満たされる"
+  guard_test: "tests/test_vram.py::test_budget_reflects_the_measured_gpu_resident_ceiling"
+
+- id: D-13
+  rule: "ChatResult は prompt/eval を分離した速度指標を ChatTimings (任意フィールド、既定 None) として持つ。ネイティブ応答が prompt_eval_count 等を返さない場合は 0 で埋めず None にする。OpenAI 互換経路では常に None"
+  rationale: "要件書 L303 (Phase 2 受け入れ) が『プロンプト処理速度』を要求し、F-1-006 が受け皿の不在を指摘している。これを返すのはネイティブ応答だけで、その実装を今行っている。0 で埋めると『プロンプトキャッシュヒットで未計測』と『実際に 0 トークン』が区別できず、Phase 2 の比較が静かに壊れる (D-07 と同じ趣旨)"
+  guard_test: "tests/test_client_native.py::test_native_result_exposes_prompt_and_eval_timings"
+
+- id: D-14
+  rule: "ruri-v3-310m / ruri-reranker はカタログに残すが、source_note に『取得不能』と理由を明記し、weights_gib は未実測の仮値のままとする。代替方式の決定は Phase 3 着手時まで行わない"
+  rationale: "Phase 0 実測で両モデルは GGUF を持たず ollama pull できないことが判明した (Ollama にはリランキング API 自体が無い)。カタログから消すと構成1/構成3 のプロファイル定義と要件書の対応が切れ、予算ガードの実証も失われる。一方で仮値を実測値と同じ体裁で置くと較正済みの 3 モデルと区別が付かなくなる"
+  guard_test: "tests/test_catalog.py::test_unavailable_models_declare_their_unavailability"
