@@ -1,5 +1,10 @@
 .PHONY: sync test cov lint fmt fmt-check type lock-check ci pre-commit clean help
 
+# ROS 2 等がシェルに PYTHONPATH を設定している環境では、venv 外の pytest プラグイン
+# (launch_testing 等) が自動ロードされて ModuleNotFoundError で落ちる。
+# 検証は uv の venv だけを見て行うため、全ターゲットで PYTHONPATH を空にする。
+export PYTHONPATH :=
+
 help:
 	@echo "Available targets:"
 	@echo "  sync         - Install dependencies (uv sync --locked)"
