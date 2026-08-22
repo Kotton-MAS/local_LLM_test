@@ -1,6 +1,25 @@
-# UV Python Template
+# local_LLM_test — ローカル LLM 実行基盤
 
-uv + Docker (Dev Container) を使った Python プロジェクトテンプレート。
+手元の GPU (RTX 4070 Ti SUPER / VRAM 16GB) 上で、外部 API に依存しない LLM 実行環境を作る。
+機密性・コスト非依存・学習の3点が狙い。要件は [`docs/localllmrequirements.md`](docs/localllmrequirements.md)。
+
+土台は uv + Docker (Dev Container) の Python プロジェクトテンプレート。
+
+## 実装状況
+
+| Phase | 内容 | 状態 |
+|---|---|---|
+| 0 | 環境構築と実測 (Ollama 導入・モデル取得・VRAM 実測) | 未着手 (手動作業) |
+| **1** | **推論クライアント層 (L2)** — `llmkit/` | **実装済み** |
+| 2 | モデル比較ハーネス | 未着手 |
+| 3 | RAG パイプライン (Obsidian vault) | 未着手 |
+| 4 | チャット UI 接続 (Open WebUI) | 未着手 |
+
+Phase 1 の残課題は [`docs/next-pr-candidates.md`](docs/next-pr-candidates.md) に、
+意図的な設計判断は `.claude/decisions.yaml` (D-01〜D-09) にあります。
+
+> **Phase 0 は未了です。** Ollama の導入と `ollama pull` は手動で行ってください。
+> 未了でも `llmkit` のテストは全件パスし、`doctor` は原因を教えて終了します (後述)。
 
 ## 前提条件
 
@@ -119,6 +138,27 @@ VRAM 予算を超えるプロファイルを指定した場合は、**HTTP を 1
 ├── .env.example             # 環境変数のテンプレート
 ├── .gitignore               # Git 除外ファイル
 ├── .pre-commit-config.yaml  # pre-commit フック設定
+├── .claude/
+│   ├── decisions.yaml       # 意図的な設計判断 (guard_test 必須)
+│   └── schemas/             # reviewer -> fixer の findings スキーマ
+├── llmkit/                  # L2: 推論クライアント層 (Phase 1)
+│   ├── config.py            # TOML 設定のロードと検証
+│   ├── catalog.py           # モデルカタログ (VRAM 見積りの静的テーブル)
+│   ├── vram.py              # プロファイル解決・見積り・予算判定
+│   ├── client.py            # ChatClient Protocol + OpenAI 互換実装
+│   ├── manifest.py          # 実行マニフェスト (再現条件の記録)
+│   ├── bootstrap.py         # 起動シーケンス
+│   ├── cli.py               # doctor / chat サブコマンド
+│   └── errors.py            # 対処方法つき例外階層
+├── configs/
+│   ├── default.toml         # ローカル Ollama 用の設定
+│   └── external_openai.toml # 外部 OpenAI 互換 API 用の設定
+├── docs/
+│   ├── localllmrequirements.md   # 要件定義 (v2)
+│   ├── next-pr-candidates.md     # 未対応の改善候補
+│   ├── plans/               # planner の仕様書
+│   └── adr/                 # architect の設計判断記録
+├── outputs/runs/            # 実行マニフェスト (gitignore 済み)
 ├── .python-version          # Python バージョン指定 (3.12)
 ├── Makefile                 # 検証コマンドの単一の真実 (make ci)
 ├── main.py                  # エントリポイント
@@ -134,7 +174,12 @@ VRAM 予算を超えるプロファイルを指定した場合は、**HTTP を 1
 uv が使用するプロジェクトメタデータと依存関係の定義ファイルです。
 
 - **requires-python**: `>=3.12`
-- **dev 依存関係**: `pytest`, `pytest-cov`, `ruff`
+- **本番依存**: `httpx` (HTTP クライアント), `pydantic` (設定・応答の検証)
+- **dev 依存関係**: `pytest`, `pytest-cov`, `ruff`, `mypy`, `pre-commit`
+
+型チェックは strict かつ `disallow_any_explicit = true` です。`Any` を明示的に書けません
+(`object` / `Protocol` / pydantic dataclass を使う)。この設定のため `pydantic.BaseModel` は
+使えません — クラス定義行が `explicit-any` エラーになります (決定 D-08)。
 
 ```bash
 # 依存関係の同期
@@ -232,3 +277,10 @@ uv run pre-commit run --all-files
 # CIの実行(ruff formatter mypy pytest の一括実行ができる)
 make ci
 ```
+
+> **`uv run pytest` が `ModuleNotFoundError: No module named 'lark'` で落ちる場合**
+>
+> シェルに ROS 2 などが `PYTHONPATH` を設定していると、pytest が venv 外のプラグインを
+> 自動ロードして失敗します。`make test` / `make ci` は Makefile 側で `PYTHONPATH` を
+> 空にするため影響を受けません。素の pytest を使いたい場合は
+> `env PYTHONPATH= uv run pytest` としてください。
