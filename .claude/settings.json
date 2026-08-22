@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "_comment": "プロジェクト固有の設定だけを置く場所。ガード (block-dangerous.sh / protect-files.sh)、自動フォーマット (format.sh)、自動コミット (auto-commit.sh)、停止前検証 (verify-ci.sh)、通知 (notify.sh) は user スコープの claude-pdca-kit (~/.claude/settings.json) が提供するため、ここには書かない。以前ここに置いていた同等のフックは、キット側と二重に発火し (通知が2回鳴る)、かつキット側より弱いパターンだったため『守られているつもり』を生んでいた。permissions.allow を列挙しないのも同じ理由で、判断は hook に一元化されている (キットの README『権限とガードレール』参照)。プロジェクト固有の reviewer や hook が必要になったら .claude/agents/ と このファイルの hooks に追加する。",
+  "permissions": {
+    "allow": [],
+    "deny": []
+  },
+  "hooks": {}
+}

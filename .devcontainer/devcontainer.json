@@ -1,0 +1,16 @@
+{
+  "name": "python_dev_template",
+  "dockerComposeFile": ["./compose.yml"],
+  "service": "workspace",
+  "workspaceFolder": "/workspace",
+  "containerEnv": {
+    "TZ": "Asia/Tokyo"
+  },
+  "features": {
+    "ghcr.io/dhoeric/features/google-cloud-cli:1": {}
+  },
+  "hostRequirements": {
+    "gpu": "optional"
+  },
+  "postCreateCommand": "sh .devcontainer/postCreateCommand.sh"
+}

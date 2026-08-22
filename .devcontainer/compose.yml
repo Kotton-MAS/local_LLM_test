@@ -1,0 +1,18 @@
+services:
+  workspace:
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    volumes:
+      - ../:/workspace
+      # コンテナ内で Claude Code + claude-pdca-kit を使う場合のみ有効化する。
+      # 認証情報 (~/.claude/ 内) もコンテナに共有される点に注意。
+      # - ~/.claude:/root/.claude
+    tty: true
+    env_file:
+      # .env は任意 (存在しなくてもビルドを止めない)
+      - path: ../.env
+        required: false
+    environment:
+      - PYTHONPATH=/workspace
+    shm_size: 8gb
