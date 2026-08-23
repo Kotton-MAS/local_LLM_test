@@ -123,8 +123,12 @@ def _real_home_identifiers() -> tuple[str, ...]:
     合成名に反応しない (実際 round-10 の時点で 3 ファイル 5 箇所ある)。
     """
     home = Path.home()
-    identifiers = {home.name, str(home)}
-    return tuple(sorted(i for i in identifiers if len(i) >= 3))
+    # **パス成分として**照合する。素の利用者名で探すと、短い一般語の
+    # 利用者名 (CI の runner など) が harness/runner.py への言及に誤反応する
+    # (実際に CI で 7 件の偽陽性を出した)。利用者名の露出はパスの形でしか
+    # 起きないので、パスの形だけを見れば十分。
+    candidates = {str(home), f"/home/{home.name}", f"/Users/{home.name}"}
+    return tuple(sorted(c for c in candidates if len(c) >= len("/home/") + 2))
 
 
 def test_no_tracked_file_exposes_the_real_user_identity() -> None:
