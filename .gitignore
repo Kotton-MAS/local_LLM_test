@@ -172,6 +172,20 @@ outputs/
 data/
 # docs/ はエージェント成果物 (仕様書・ADR) の置き場のためコミット対象とする
 
+# vaults/ はホワイトリスト方式にする。合成 vault (公開可能) だけを追跡し、
+# それ以外は既定で無視する。
+#
+# 理由: vaults/sample.toml が「実 vault を索引するときは vaults/local.toml を
+# 作る」と案内しており、local.toml の [vault] dir には実 vault の絶対パス
+# (利用者名を含む) が入る。このリポジトリは PUBLIC で、SubagentStop の
+# 自動コミットは local.toml を機密扱いしないため、列挙方式 (無視するものを
+# 並べる) では local2.toml・vaults/private/ のような派生を取りこぼす。
+# 追跡するものを列挙する側に倒すと、取りこぼしは「無視されすぎる」方向に
+# 出るので公開事故にならない。
+vaults/*
+!vaults/sample/
+!vaults/sample.toml
+
 
 .ruff_cache
 
