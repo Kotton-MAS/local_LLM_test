@@ -1,0 +1,345 @@
+{
+  "config": {
+    "path": "configs/default.toml",
+    "sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10"
+  },
+  "counts": {
+    "error": 0,
+    "measure": 24,
+    "records": 27,
+    "warmup": 3
+  },
+  "manifests": [
+    "manifests/20260823T034655Z-adb14a826f4a.json",
+    "manifests/20260823T034759Z-fd9b8bf01201.json",
+    "manifests/20260823T034831Z-6659449e2b77.json"
+  ],
+  "models": [
+    {
+      "attempted": 8,
+      "case_index": 0,
+      "context_tokens": 16384,
+      "generation_tokens_per_second": {
+        "median": 61.747886667821874,
+        "n": 8,
+        "total": 8
+      },
+      "generation_tokens_per_second_source": "eval",
+      "model_id": "qwen3-14b",
+      "profile_name": "rag_default",
+      "prompt_tokens_per_second": {
+        "median": 2347.0695678504962,
+        "n": 8,
+        "total": 8
+      },
+      "quantization": "Q4_K",
+      "served_name": "qwen3:14b-q4_K_M",
+      "succeeded": 8,
+      "vram_budget_gib": 14.0,
+      "vram_estimate_gib": 11.98,
+      "vram_increment_gib": 11.134765625,
+      "vram_used_mib": 12243,
+      "vram_within_budget": true,
+      "wallclock_tokens_per_second": {
+        "median": 61.05268200991608,
+        "n": 8,
+        "total": 8
+      }
+    },
+    {
+      "attempted": 8,
+      "case_index": 1,
+      "context_tokens": 16384,
+      "generation_tokens_per_second": {
+        "median": 133.75965824523166,
+        "n": 8,
+        "total": 8
+      },
+      "generation_tokens_per_second_source": "eval",
+      "model_id": "gpt-oss-20b",
+      "profile_name": "long_context",
+      "prompt_tokens_per_second": {
+        "median": 2256.2320789911337,
+        "n": 8,
+        "total": 8
+      },
+      "quantization": "MXFP4",
+      "served_name": "gpt-oss:20b",
+      "succeeded": 8,
+      "vram_budget_gib": 14.0,
+      "vram_estimate_gib": 12.5104,
+      "vram_increment_gib": 12.505859375,
+      "vram_used_mib": 13647,
+      "vram_within_budget": true,
+      "wallclock_tokens_per_second": {
+        "median": 130.75271585380546,
+        "n": 8,
+        "total": 8
+      }
+    },
+    {
+      "attempted": 8,
+      "case_index": 2,
+      "context_tokens": 16384,
+      "generation_tokens_per_second": {
+        "median": 105.8238638004829,
+        "n": 8,
+        "total": 8
+      },
+      "generation_tokens_per_second_source": "eval",
+      "model_id": "qwen3-8b",
+      "profile_name": "lightweight",
+      "prompt_tokens_per_second": {
+        "median": 3743.0315947704457,
+        "n": 8,
+        "total": 8
+      },
+      "quantization": "Q4_K",
+      "served_name": "qwen3:8b-q4_K_M",
+      "succeeded": 8,
+      "vram_budget_gib": 14.0,
+      "vram_estimate_gib": 7.259999999999999,
+      "vram_increment_gib": 7.267578125,
+      "vram_used_mib": 8283,
+      "vram_within_budget": true,
+      "wallclock_tokens_per_second": {
+        "median": 104.17909551605865,
+        "n": 8,
+        "total": 8
+      }
+    }
+  ],
+  "reproduction": {
+    "cases": [
+      {
+        "config_path": "configs/default.toml",
+        "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+        "generation": {
+          "context_tokens": 16384,
+          "max_output_tokens": 512,
+          "model": "qwen3-14b",
+          "seed": 0,
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+        "profile": {
+          "models": [
+            {
+              "model_id": "qwen3-14b",
+              "quantization": "Q4_K",
+              "role": "generation",
+              "served_name": "qwen3:14b-q4_K_M",
+              "serving_runtime": "ollama"
+            },
+            {
+              "model_id": "ruri-v3-310m",
+              "quantization": "unknown (GGUF)",
+              "role": "embedding",
+              "served_name": "hf.co/Targoyle/ruri-v3-310m-GGUF",
+              "serving_runtime": "ollama"
+            },
+            {
+              "model_id": "bge-reranker-v2-m3",
+              "quantization": "Q6_K",
+              "role": "reranker",
+              "served_name": "bge-reranker-v2-m3-Q6_K.gguf",
+              "serving_runtime": "llama_cpp_server"
+            }
+          ],
+          "name": "rag_default"
+        },
+        "python_version": "3.12.3",
+        "runtime": {
+          "api_key_env": "LLMKIT_API_KEY",
+          "api_style": "ollama_native",
+          "base_url": "http://localhost:11434/v1",
+          "endpoint_url": "http://localhost:11434/api/chat",
+          "is_local": true,
+          "kind": "ollama",
+          "timeout_s": 120.0
+        },
+        "schema_version": "1",
+        "vram": {
+          "budget_gib": 14.0,
+          "kv_cache_gib": 2.52,
+          "runtime_overhead_gib": 0.8,
+          "total_gib": 11.98,
+          "weights_gib": {
+            "bge-reranker-v2-m3": 0.28,
+            "qwen3-14b": 7.81,
+            "ruri-v3-310m": 0.57
+          },
+          "weights_total_gib": 8.66,
+          "within_budget": true
+        }
+      },
+      {
+        "config_path": "configs/default.toml",
+        "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+        "generation": {
+          "context_tokens": 16384,
+          "max_output_tokens": 512,
+          "model": "gpt-oss-20b",
+          "seed": 0,
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+        "profile": {
+          "models": [
+            {
+              "model_id": "gpt-oss-20b",
+              "quantization": "MXFP4",
+              "role": "generation",
+              "served_name": "gpt-oss:20b",
+              "serving_runtime": "ollama"
+            }
+          ],
+          "name": "long_context"
+        },
+        "python_version": "3.12.3",
+        "runtime": {
+          "api_key_env": "LLMKIT_API_KEY",
+          "api_style": "ollama_native",
+          "base_url": "http://localhost:11434/v1",
+          "endpoint_url": "http://localhost:11434/api/chat",
+          "is_local": true,
+          "kind": "ollama",
+          "timeout_s": 120.0
+        },
+        "schema_version": "1",
+        "vram": {
+          "budget_gib": 14.0,
+          "kv_cache_gib": 0.3904,
+          "runtime_overhead_gib": 0.8,
+          "total_gib": 12.5104,
+          "weights_gib": {
+            "gpt-oss-20b": 11.32
+          },
+          "weights_total_gib": 11.32,
+          "within_budget": true
+        }
+      },
+      {
+        "config_path": "configs/default.toml",
+        "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+        "generation": {
+          "context_tokens": 16384,
+          "max_output_tokens": 512,
+          "model": "qwen3-8b",
+          "seed": 0,
+          "temperature": 0.7,
+          "top_p": 0.9
+        },
+        "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+        "profile": {
+          "models": [
+            {
+              "model_id": "qwen3-8b",
+              "quantization": "Q4_K",
+              "role": "generation",
+              "served_name": "qwen3:8b-q4_K_M",
+              "serving_runtime": "ollama"
+            }
+          ],
+          "name": "lightweight"
+        },
+        "python_version": "3.12.3",
+        "runtime": {
+          "api_key_env": "LLMKIT_API_KEY",
+          "api_style": "ollama_native",
+          "base_url": "http://localhost:11434/v1",
+          "endpoint_url": "http://localhost:11434/api/chat",
+          "is_local": true,
+          "kind": "ollama",
+          "timeout_s": 120.0
+        },
+        "schema_version": "1",
+        "vram": {
+          "budget_gib": 14.0,
+          "kv_cache_gib": 2.28,
+          "runtime_overhead_gib": 0.8,
+          "total_gib": 7.259999999999999,
+          "weights_gib": {
+            "qwen3-8b": 4.18
+          },
+          "weights_total_gib": 4.18,
+          "within_budget": true
+        }
+      }
+    ],
+    "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+    "prompts": [
+      {
+        "id": "summarize",
+        "system_sha256": "6a33ac300390e9249d34e8ec99df0e9d6f6e3185d8e2b9a59d3d4433c80ba80e",
+        "text_sha256": "9b937a317b1ff26311c3a6b32edfdf024603686e29e4c35c3f06dcb7dd3fe17c"
+      },
+      {
+        "id": "paraphrase",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "cfa793be6f3f747b7317c66a45da3c7ab680260a461c8ed039112d054e4b94ec"
+      },
+      {
+        "id": "bulletize",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "6709bb901ef462c85e37d311712dda187b96655e93df78b9ab1464c88e9b89a6"
+      },
+      {
+        "id": "explain_term",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "aed5faef95ee23dcd775c38ee16c2f22f2ec4b37fcca7c9b90ed09158dcbc325"
+      },
+      {
+        "id": "translate_short",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "3defea3450a909a8f525969d6f64143f7392dcce154f2e4ee297ae65bba7f767"
+      },
+      {
+        "id": "extract_structured",
+        "system_sha256": "eb5425216326da52ef98f21ec467374706ae84c357b6aca33bcfe1b23dae9904",
+        "text_sha256": "7841b581b97320f88c8a9e587064360292bba55882b49ddf3c785ec9cdd44f9e"
+      },
+      {
+        "id": "follow_instructions",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "55c76881845ae34cc7d5e532f4785b27f64f628c7c70fd7f045f7cf300db542f"
+      },
+      {
+        "id": "ambiguous_request",
+        "system_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text_sha256": "74d563ac74b2b4197aaede72c203b4a9f4be311a564716cf97a40c4701ea5aa9"
+      }
+    ],
+    "schema_version": "1",
+    "suite_sha256": "18ad5d4f3feafbe7071ab6adac32fbe2b5c9f1486692743925892fc16ec1a154",
+    "warmup_runs": 1
+  },
+  "run_fingerprint": "324de92cc334366bd7cfca41816ce81082977bf964051a9e75c2e77d75133e24",
+  "run_id": "aa1ae767c9fa",
+  "schema_version": "1",
+  "started_at_utc": "2026-08-23T03:46:55.303138Z",
+  "suite": {
+    "description": "日本語の基本タスク 8 問で生成速度・VRAM・再現条件を比較する",
+    "filters": {
+      "limit": null,
+      "models": null
+    },
+    "id": "ja_basic",
+    "path": "suites/ja_basic.toml",
+    "prompt_ids": [
+      "summarize",
+      "paraphrase",
+      "bulletize",
+      "explain_term",
+      "translate_short",
+      "extract_structured",
+      "follow_instructions",
+      "ambiguous_request"
+    ],
+    "sha256": "18ad5d4f3feafbe7071ab6adac32fbe2b5c9f1486692743925892fc16ec1a154",
+    "warmup_runs": 1
+  },
+  "vram_idle_mib": 841
+}

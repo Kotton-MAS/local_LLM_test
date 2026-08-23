@@ -1,0 +1,49 @@
+{
+  "config_path": "configs/default.toml",
+  "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+  "generation": {
+    "context_tokens": 16384,
+    "max_output_tokens": 512,
+    "model": "qwen3-8b",
+    "seed": 0,
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+  "profile": {
+    "models": [
+      {
+        "model_id": "qwen3-8b",
+        "quantization": "Q4_K",
+        "role": "generation",
+        "served_name": "qwen3:8b-q4_K_M",
+        "serving_runtime": "ollama"
+      }
+    ],
+    "name": "lightweight"
+  },
+  "python_version": "3.12.3",
+  "run_id": "6659449e2b77",
+  "runtime": {
+    "api_key_env": "LLMKIT_API_KEY",
+    "api_style": "ollama_native",
+    "base_url": "http://localhost:11434/v1",
+    "endpoint_url": "http://localhost:11434/api/chat",
+    "is_local": true,
+    "kind": "ollama",
+    "timeout_s": 120.0
+  },
+  "schema_version": "1",
+  "started_at_utc": "2026-08-23T03:48:31.525607Z",
+  "vram": {
+    "budget_gib": 14.0,
+    "kv_cache_gib": 2.28,
+    "runtime_overhead_gib": 0.8,
+    "total_gib": 7.259999999999999,
+    "weights_gib": {
+      "qwen3-8b": 4.18
+    },
+    "weights_total_gib": 4.18,
+    "within_budget": true
+  }
+}
