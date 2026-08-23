@@ -74,6 +74,21 @@
   guard_test: "tests/test_client_native.py::test_native_result_exposes_prompt_and_eval_timings"
 
 - id: D-14
-  rule: "ruri-v3-310m / ruri-reranker はカタログに残すが、source_note に『取得不能』と理由を明記し、weights_gib は未実測の仮値のままとする。代替方式の決定は Phase 3 着手時まで行わない"
-  rationale: "Phase 0 実測で両モデルは GGUF を持たず ollama pull できないことが判明した (Ollama にはリランキング API 自体が無い)。カタログから消すと構成1/構成3 のプロファイル定義と要件書の対応が切れ、予算ガードの実証も失われる。一方で仮値を実測値と同じ体裁で置くと較正済みの 3 モデルと区別が付かなくなる"
-  guard_test: "tests/test_catalog.py::test_unavailable_models_declare_their_unavailability"
+  rule: "【撤回】旧 D-14 (ruri-v3-310m / ruri-reranker は取得不能。weights_gib は仮値のまま、方式決定は Phase 3) を撤回する。カタログの全モデルは実測に裏付けられ、source_note に『取得不能』『(仮)』を残さない。リランカーは要件書第一候補の Ruri Reranker ではなく BGE Reranker v2-m3 (model_id = bge-reranker-v2-m3) を採用する"
+  rationale: "2026-08-23 の実機検証で前提が覆った。埋め込みは有志の GGUF 変換版 hf.co/Targoyle/ruri-v3-310m-GGUF で ollama pull でき /v1/embeddings が 768 次元を返した (VRAM 実測 0.57 GiB)。ollama pull できなかったのは Hugging Face の元リポジトリ (sentence-transformers 形式) だけだった。リランカーは Ollama に rerank API が無い (v0.33.0-rc2 でも /api/rerank・/v1/rerank とも 404、GitHub issue は open のまま) が、llama.cpp の llama-server で /v1/rerank が動作した (VRAM 実測 0.28 GiB、50 ペア 140 ms)。Ruri Reranker は GGUF が存在しないため、要件書が代替として挙げる BGE Reranker v2-m3 を採った。旧 D-14 の『Phase 3 まで決定しない』は事実に反する状態になり、残すと fixer が仮値を復活させる根拠になる。id を維持するのは過去の仕様書・PR 本文が D-14 を参照しているため (削除すると参照先が消える)"
+  guard_test: "tests/test_catalog.py::test_no_catalog_entry_claims_to_be_unavailable"
+
+- id: D-15
+  rule: "『どのサーバプロセスがそのモデルを載せるか』は ModelSpec.serving_runtime (ServingRuntime = Literal['ollama','llama_cpp_server','external']) で表す。既存の config.RuntimeKind / client.ApiStyle を再利用せず、既定値も与えない。Phase 1 ではディスパッチに使わず、実行マニフェストに記録する。resolve_model_spec は、カタログ登録済み model_id であっても is_local=false (外部 API) の解決では serving_runtime を 'external' に差し替える (weights_gib / kv_gib_per_1k_tokens はカタログ値のまま維持し VRAM 見積りの挙動は変えない)。is_local=true ではカタログの ModelSpec をそのまま返す"
+  rationale: "RuntimeKind は接続単位のチャット送出経路、ApiStyle はワイヤプロトコルであり、どちらもモデル単位の『載せ先プロセス』を表さない。リランカーに openai_compatible を持たせると『このモデルは chat を話す』という偽の主張になる。また catalog.py が config.py を import すると最下層モジュールの独立性 (test_estimate_is_pure_and_needs_no_gpu が守る性質) が崩れる。source_note に散文で書く案は機械識別できず Phase 3 のディスパッチが文字列マッチに退行するため採らない。既定値を与えると将来のモデルが黙って Ollama 扱いになり、まさに今回検出した誤りを再生産する。飾りにしないためマニフェストへ配線し掃引テストで固定する。2026-08-23 round 6 レビュー (F-6-001) で、外部 API 実行 (is_local=false) でもカタログ登録済みモデルは serving_runtime='ollama' のまま返っており、実際の載せ先と無関係にモデルのカタログ登録有無で決まる偽の主張が対称的に発生することが判明したため、resolve_model_spec の挙動を追記した"
+  guard_test: "tests/test_catalog.py::test_models_declare_the_runtime_that_serves_them"
+
+- id: D-16
+  rule: "VRAM 見積りは別プロセス (llama-server) が確保する分も単純に合算する。llmkit/vram.py の式は変更しない。埋め込み・リランカーの weights_gib は『純粋な重み』ではなく、そのランタイムのオーバーヘッドを含む実測 VRAM 増分そのものを入れる。vram.runtime_overhead_gib (0.8) は生成ランタイム 1 つ分を表す"
+  rationale: "予算判定の対象は nvidia-smi が返すデバイス全体の使用量であり、プロセス境界と無関係。budget_gib は D-12 で『実測でオフロードが始まらない増分の上限』と定義済みで、これもプロセス非依存の量である。2026-08-23 の同居実測 (アイドル 0.56 を除く増分 11.97 GiB) に対し較正後見積りは 11.98 GiB で、成分ごとにも一致した (生成 11.13 vs 11.12 / 埋め込み 0.57 / リランカー 0.28)。モデル単位のオーバーヘッド欄を足すと見積り式と ModelSpec の両方が変わるが、実測は合計値しか取れておらず分離の根拠が無い"
+  guard_test: "tests/test_vram.py::test_estimate_reproduces_the_configuration1_coresidency_measurement"
+
+- id: D-17
+  rule: "llama-server の起動はリポジトリ内の scripts/start-reranker.sh で行い、systemd ユニットを作らない。バイナリ・モデル・ホスト・ポート・GPU レイヤ数・ctx-size はすべて環境変数で上書き可能にし、リポジトリ外の絶対パスをハードコードしない。--dry-run は解決結果を出力して exit 0 する (存在チェックをしない)"
+  rationale: "llama.cpp は ~/.local/opt、モデルは ~/.local/share/llama-models に置いた (システムを汚さないユーザースコープ)。この配置は開発者ごとに異なるため既定値としてのみ持ち上書き可能にする。systemd を触ると Ollama 側の管理方式と二重になり、不可逆な変更 (要承認) にもなる。--dry-run を存在チェック無しにするのは llama-server が無い CI で環境変数の配線をテストするため (無いと『上書きできるはず』が散文の主張のままになる)"
+  guard_test: "tests/test_reranker_script.py::test_launch_script_paths_are_overridable_by_environment"

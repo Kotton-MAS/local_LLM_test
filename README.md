@@ -9,17 +9,20 @@
 
 | Phase | 内容 | 状態 |
 |---|---|---|
-| 0 | 環境構築と実測 (Ollama 導入・モデル取得・VRAM 実測) | 未着手 (手動作業) |
+| **0** | **環境構築と実測 (Ollama 導入・モデル取得・VRAM 実測)** | **完了 (2026-08-23 実測)** |
 | **1** | **推論クライアント層 (L2)** — `llmkit/` | **実装済み** |
 | 2 | モデル比較ハーネス | 未着手 |
 | 3 | RAG パイプライン (Obsidian vault) | 未着手 |
 | 4 | チャット UI 接続 (Open WebUI) | 未着手 |
 
 Phase 1 の残課題は [`docs/next-pr-candidates.md`](docs/next-pr-candidates.md) に、
-意図的な設計判断は `.claude/decisions.yaml` (D-01〜D-09) にあります。
+意図的な設計判断は `.claude/decisions.yaml` (D-01〜D-17) にあります。
 
-> **Phase 0 は未了です。** Ollama の導入と `ollama pull` は手動で行ってください。
-> 未了でも `llmkit` のテストは全件パスし、`doctor` は原因を教えて終了します (後述)。
+> **Phase 0 は完了しています** (受け入れ条件 5 項目すべて充足。実測は
+> [`docs/phase0-vram-measurements.md`](docs/phase0-vram-measurements.md))。
+> ただし Ollama の導入・`ollama pull`・リランカー用 llama-server の配置は
+> **各マシンで手動**に行う必要があります (同ドキュメントの「環境の再現手順」)。
+> 未セットアップのマシンでも `llmkit` のテストは全件パスし、`doctor` は原因を教えて終了します (後述)。
 
 ## 前提条件
 
@@ -85,7 +88,7 @@ uv run python -m llmkit.cli doctor --config configs/default.toml
 uv run python -m llmkit.cli chat "日本語で自己紹介して" --config configs/default.toml
 ```
 
-**Phase 0 (Ollama の導入・`ollama pull`) が未了でも `doctor` は実行できます。**
+**Ollama の導入・`ollama pull` が済んでいないマシンでも `doctor` は実行できます。**
 そのときは原因と対処方法を出して終了コード 1 で終わります。
 
 ```
@@ -126,6 +129,50 @@ Phase 0 実測で、Ollama の OpenAI 互換エンドポイントは `options.nu
 - **api_key の値は設定ファイルに書きません。** 環境変数「名」を `runtime.api_key_env` に書き、
   値は `export LLMKIT_API_KEY=...` で渡します (決定 D-05)。値を直接書くと読み込み時に落ちます。
 - VRAM の単位はすべて GiB です (決定 D-03)。
+
+### リランカーは別ランタイム (llama.cpp llama-server)
+
+**Ollama にはリランキング API がありません。** `POST /api/rerank` と `POST /v1/rerank` は
+いずれも 404 を返し、最新版 (v0.33.0-rc2) でも未対応です。GGUF 自体は存在しますが、
+スコアを返すエンドポイントが無いため Ollama に載せても使えません。
+そのため**リランカーだけ llama.cpp の `llama-server` を別ポートで併走**させます (決定 D-17)。
+
+```bash
+# 解決したコマンド行を表示するだけ (llama-server が無くても動く。終了コード 0)
+scripts/start-reranker.sh --dry-run
+
+# 実際に起動する (フォアグラウンド。既定 127.0.0.1:8081)
+scripts/start-reranker.sh
+```
+
+リポジトリ外のパスはハードコードせず、すべて環境変数で上書きできます。
+
+| 環境変数 | 既定値 |
+|---|---|
+| `LLAMA_SERVER_BIN` | `~/.local/opt/llama.cpp/llama-server` |
+| `RERANKER_MODEL` | `~/.local/share/llama-models/bge-reranker-v2-m3-Q6_K.gguf` |
+| `RERANKER_HOST` | `127.0.0.1` (ループバック) |
+| `RERANKER_PORT` | `8081` |
+| `RERANKER_NGL` | `99` (GPU オフロードするレイヤ数) |
+| `RERANKER_CTX_SIZE` | `2048` |
+
+- **`llama-server` には認証機構がありません。** `RERANKER_HOST` を既定の
+  `127.0.0.1` 以外 (例 `0.0.0.0`) にすると、LAN 上の誰でも無認証で
+  `/v1/rerank` を叩け、GPU 資源の消費や入力文書の投入が可能になります。
+  リモートから使う場合は `RERANKER_HOST` を変えず、SSH ポートフォワード
+  (`ssh -L 8081:127.0.0.1:8081 <このホスト>`) を使ってください。
+- **CUDA toolkit は不要です。** Vulkan が NVIDIA GPU を認識していれば、配布されている
+  プリビルドバイナリ (`llama-b10586-bin-ubuntu-vulkan-x64.tar.gz`) で GPU が使えます。
+  ソースビルドも不要です (`vulkaninfo --summary` で認識を確認できます)。
+- モデルは `gpustack/bge-reranker-v2-m3-GGUF` の `bge-reranker-v2-m3-Q6_K.gguf` (478 MB)。
+  第一候補だった `Ruri Reranker` は GGUF が存在しないため採用していません。
+- 実測は **VRAM 0.28 GiB / 50 ペアの再ランキング 140 ms** です
+  (`--ctx-size 2048` / `--n-gpu-layers 99` の 1 点。`RERANKER_CTX_SIZE` を上げると
+  カタログの `0.28` が過小評価になるため、上げる場合は測り直してください)。
+- **Phase 1 では埋め込み・リランカーの推論呼び出しを実装していません。**
+  `llmkit` はこの 2 つを **VRAM 見積りに計上するだけ**です (実際に呼ぶのは Phase 3)。
+  別プロセスが確保する分も合算します。予算判定の対象が `nvidia-smi` の返す
+  デバイス全体の使用量であり、プロセス境界と無関係なためです (決定 D-16)。
 
 ### 実行マニフェスト
 
@@ -179,6 +226,8 @@ Phase 0 実測で、Ollama の OpenAI 互換エンドポイントは `options.nu
 │   ├── next-pr-candidates.md     # 未対応の改善候補
 │   ├── plans/               # planner の仕様書
 │   └── adr/                 # architect の設計判断記録
+├── scripts/
+│   └── start-reranker.sh    # リランカー用 llama-server の起動 (パスは環境変数で上書き可)
 ├── outputs/runs/            # 実行マニフェスト (gitignore 済み)
 ├── .python-version          # Python バージョン指定 (3.12)
 ├── Makefile                 # 検証コマンドの単一の真実 (make ci)
