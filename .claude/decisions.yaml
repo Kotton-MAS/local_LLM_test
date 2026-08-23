@@ -129,3 +129,35 @@
   rule: "results/ 配下の比較結果はコミット対象とする (outputs/ は .gitignore のまま)。コミットするのは 1 実行分だけで、スイートには機密情報・個人情報・認証情報らしき文字列を書かない"
   rationale: "要件書 L305 が『日本語プロンプトで 3 モデル以上を比較した結果が results/ 配下に残っている』ことを受け入れ条件にしており、ignore すると条件そのものが検証不能になる。outputs/ は実行のたびに増える一時物であり、両者を同じ規則で扱うとリポジトリが実行ログで膨らむ。応答本文は制御できない (仕様書 §7 リスク2) ため、少なくとも入力側 (スイート) は機械検査できる状態に保つ"
   guard_test: "tests/test_harness_cli.py::test_the_shipped_suite_carries_no_credential_like_strings"
+
+# 出典: docs/plans/2026-08-23-phase3-indexing.md §6 (3a = D-25 / D-27 / D-30 / D-31 / D-32 / D-34)
+
+- id: D-25
+  rule: "埋め込みの HTTP 呼び出しは llmkit (L2) の llmkit/embeddings.py に置く。rag/ (L3) には HTTP メソッド呼び出し (.post / .get / .request) もランタイムのエンドポイント文字列も 1 つも書かない。httpx / requests / urllib / http / socket を import しない"
+  rationale: "要件書 L239『推論ランタイムへの直接依存をアプリケーション層に持ち込まない。L2 の抽象を必ず経由する』。rag/embed.py に HTTP を置くと、_HttpEndpointClient が持つ例外翻訳表 (ModelNotFoundError / OutOfMemoryError / ContextLengthError / RuntimeUnavailableError) を複製することになり、D-07 とセキュリティ原則 (本文を例外に載せない) が 2 か所に分岐する。加えて L3 が『ランタイムを叩くもの』と『叩かないもの』に分裂し、harness で確立した層の境界検査が意味を失う。import 検査だけでは httpx を直接使う経路を塞げないため、AST でメソッド呼び出し名と非 docstring 文字列リテラルも見る。副作用として dict.get も落ちるが、誤検出を許して検査を鈍らせる (受け手を名前で絞る等) より、rag/ 側の書き方を in + 添字の 1 つに固定するほうが境界が強い"
+  guard_test: "tests/test_rag_layout.py::test_rag_never_talks_to_the_runtime_directly"
+
+- id: D-27
+  rule: "埋め込みモデル ID の出典は configs の profiles[active].embedding だけにする。rag/ の索引設定 TOML に埋め込みモデル名のキーを作らない。embedding が None のプロファイルでは ConfigError にし、既定値で代替しない。guard_test に引けるのは単一のテストだけなので『出典が 1 か所であること』を指す。『索引設定 TOML にキーを作らない』は tests/test_rag_settings.py::test_unknown_keys_are_rejected (extra='forbid' の一般検査)、『embedding 未設定は ConfigError』は tests/test_embeddings.py::test_profile_without_an_embedding_model_raises_config_error が別途固定する (F-9-008 と同型の抜けを先回りして明記)"
+  rationale: "D-19 で実測した『モデル ID が 2 か所に現れると、片方だけ差し替えた実行が何のエラーも出さずに嘘の成果物を作る』が、索引ではさらに悪い形で起きる。索引 TOML 側にモデル名を置くと、生成側の profiles[active].embedding と食い違ったまま『次元も意味空間も異なるベクトルが同じストアに同居する』状態を作れてしまい、コサイン類似度が無意味になっても例外もテスト失敗も出ない。ID を 1 か所に閉じれば、モデル差し替えは index_fingerprint の変化として 3b の差分更新に必ず伝わる。既定値を与えない理由は D-15 と同じで、既定を置くと未設定のプロファイルが黙って特定のモデルを名乗る"
+  guard_test: "tests/test_embeddings.py::test_embedding_model_comes_from_the_active_profile_only"
+
+- id: D-30
+  rule: "vault への I/O は rag/vault.py だけが行い、そのモジュールに書き込み API を 1 つも書かない (open の w/a/x/+、write_text / write_bytes / mkdir / touch / unlink / rename / replace / chmod / shutil.* / os.remove)。index.dir が vault.dir 配下に解決される設定は ConfigError にする。検査は構造 (読み取りを 1 モジュールに閉じる) / 静的 (AST) / 動的 (実行前後で vault 配下の全エントリの相対パス・size・st_mtime_ns・st_mode・sha256 が完全一致、エントリの増減も見る) / 設定 の 4 層で行う。guard_test に引けるのは単一のテストだけなので動的層 (最も『バグで書き換えた』を直接検出する層) を指す。構造層は tests/test_rag_layout.py::test_only_the_vault_module_reads_the_vault、静的層は tests/test_rag_vault.py::test_no_vault_module_calls_a_write_api、設定層は tests/test_rag_settings.py::test_index_dir_inside_the_vault_is_rejected が別途固定する (F-9-008)"
+  rationale: "vault は利用者の一次資料であり、索引処理が書き換える理由が 1 つも無い。にもかかわらず『バグで壊した』は git で戻せない不可逆な事故になる (仕様書 §7 リスク3)。読み取りを 1 モジュールに閉じて初めて『書き込み API が無い』ことの静的検査が全経路をカバーでき、散らばると検査していないモジュールから書く経路が開く。静的検査だけでは実行時に構築した呼び出しを塞げないため動的検査を併置し、逆に動的検査だけでは『そのテストが通る経路を実行しなかった』場合に無力なので静的検査を残す。index.dir を設定で塞ぐのは、コードが読み取り専用でも索引の出力先を vault 内に向ければ書き込みが起きるため (唯一残る経路)。4層のうち guard_test が動的層 1 本しか引いていなかったため、Stop hook (guard_test だけを実走する運用) が設定層・静的層を弱める変更を検出できない抜けがあった (D-15 と同型)"
+  guard_test: "tests/test_rag_vault.py::test_indexing_leaves_every_vault_file_byte_identical"
+
+- id: D-31
+  rule: "frontmatter のパースに PyYAML を導入せず、YAML のサブセット (スカラ / インラインリスト / ブロックリスト / クォート文字列) だけを解釈する。1 行目が厳密に '---' で以降に閉じの '---' がある場合だけを frontmatter とし、閉じが無ければファイル全体を本文として扱う。解釈できない行があっても例外にせず、frontmatter_raw に全文を残し、本文には決して混ぜない"
+  rationale: "PyYAML は新規依存で uv.lock 無変更という制約に反し、D-18 が TOML を選んだ理由と同じ判断になる。閉じの判定を緩める案 (閉じが無くても frontmatter とみなす) は、書きかけのノートや '---' で始まる水平線のノートの冒頭が本文から黙って消えるため採らない。逆に解釈できない行を本文へ回す案は、tags: [社外秘] のようなメタ情報が検索対象の本文に化けるため採らない。どちらも例外を出さずに索引の中身だけが壊れる型の欠陥であり、『捨てない・混ぜない・例外にしない』の 3 つを同時に満たす唯一の形が frontmatter_raw への全文保持である"
+  guard_test: "tests/test_rag_parser.py::test_unparsable_frontmatter_never_leaks_into_the_body"
+
+- id: D-32
+  rule: "チャンクのトークン数は外部トークナイザにもランタイム API にも依存せず、文字種別ベースの決定論的近似で数える: ceil(CJK 文字数 / cjk_chars_per_token + その他の文字数 / ascii_chars_per_token) (既定 1.0 / 4.0)。係数と max_tokens と heading_separator は設定可能で、すべて index_fingerprint に入れる。上限は body ではなく embed_text (見出し経路 + 本文) に対して適用する。近似であることを関数名 (estimate_tokens) と docstring と設定キーの説明に明示する。**この近似式は rag/chunker.py に唯一の実装 (_tokens_from_counts) として置き、estimate_tokens (公開 API) と文字境界フォールバック (_pack_characters 内の tokens_for) はどちらもその合成/部分適用でなければならない。式を独立に複製しない (性能上の理由でクロージャに再実装するのも禁止)**。guard_test に引けるのは単一のテストだけなので『決定論的な近似式そのもの』を指す。『上限が embed_text に適用されること』は tests/test_rag_chunker.py::test_estimated_tokens_is_the_number_used_for_the_limit が別途固定する。『文字境界フォールバックも同じ式を通ること』は tests/test_rag_chunker.py::test_character_boundary_fallback_shares_the_token_formula が別途固定する (round-10 レビュー: 独立実装により estimate_tokens を差し替えても文字境界の分割数が追随しない乖離が入っていた)。『係数等が index_fingerprint に入る』は 3b (差分更新) の実装後に guard_test が実在してから追記する (3a 時点では index_fingerprint 自体が未実装のため検証不能、D-30 の申し送りと同じ扱い、F-9-008 と同型の抜けを先回りして明記)"
+  rationale: "要件書 L185 が求めているのは『上限 240 トークン目安 (設定可能)』であって正確なトークン数ではない。tiktoken は新規依存であるうえ BPE が cl100k で ruri-v3 (ModernBERT-ja 系) とも Qwen とも別のトークナイザなので、依存を増やしても正確さは得られない。Ollama に数えさせる案はチャンク境界の決定にネットワーク往復が要り、D-02 (テストは実 HTTP を出さない) と両立せず --dry-run が HTTP 0 回で計画を出せなくなる。純関数なので CI で全経路を決定論的に検証できる。上限を body に適用すると見出し経路の分だけ超過したテキストが埋め込みへ渡り、超過は例外にもテスト失敗にもならないまま埋め込み側で切り詰められて検索精度だけが落ちる (実測: 合成 vault で 257 > 240 のチャンクが 1 件発生する)"
+  guard_test: "tests/test_rag_chunker.py::test_token_estimate_is_deterministic_and_configurable"
+
+- id: D-34
+  rule: "wikilink の解決はコードフェンスの内側でも一律に行い、見出しの検出はコードフェンスの内側を無視する。この非対称は意図的であり、どちらかに揃えない"
+  rationale: "両者の目的が違う。見出しはチャンクの境界を決めるため、フェンス内の '# コメント' で切るとコードブロックが途中で分断され、埋め込み対象として意味を成さないチャンクが生まれる。wikilink は表示テキストとメタデータの抽出であり、フェンス内に残すと '[[' ']]' という記法上の記号が埋め込みテキストへ混入する。フェンス内のリンクだけ別扱いにすると、同じ記法が置かれた場所によって別の意味を持つことになり、要件書 L312 (wikilink が解決されている) の検査を『[[ が body に 1 つも残らない』という単純な全ノート走査で書けなくなる。散文で『意図的な非対称』と書くだけでは、後続の fixer が一貫性のために片方へ揃えても何も落ちないため、両方向を 1 つのテストで固定する"
+  guard_test: "tests/test_rag_parser.py::test_wikilinks_inside_code_fences_are_resolved_but_headings_are_not"
