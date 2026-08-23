@@ -33,7 +33,7 @@ active_profile = "rag_default"
 [profiles.rag_default]
 generation = "qwen3-14b"
 embedding = "ruri-v3-310m"
-reranker = "ruri-reranker"
+reranker = "bge-reranker-v2-m3"
 
 # 要件書 構成2: 長文要約。埋め込み・リランカーを退避する
 [profiles.long_context]
@@ -46,4 +46,4 @@ generation = "qwen3-8b"
 [profiles.oversized]
 generation = "gpt-oss-20b"
 embedding = "ruri-v3-310m"
-reranker = "ruri-reranker"
+reranker = "bge-reranker-v2-m3"

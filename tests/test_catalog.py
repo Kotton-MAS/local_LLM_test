@@ -4,18 +4,22 @@
 ここでロックする。数値を書き換えると ``test_catalog_reproduces_phase0_measurements``
 (Phase 0 実測 8 点の再現) と tests/test_vram.py のプロファイル値テストも落ちる。
 
-このファイルは 1 つの guard_test を含む:
+このファイルは 2 つの guard_test を含む:
 
-- ``test_unavailable_models_declare_their_unavailability`` … D-14
-  (取得不能なモデルは仮値である旨と理由を source_note に明記する)
+- ``test_no_catalog_entry_claims_to_be_unavailable`` … D-14 (撤回後の主張)
+  (カタログの全モデルが実測に裏付けられ、``(仮)`` / ``取得不能`` を残さない)
+- ``test_models_declare_the_runtime_that_serves_them`` … D-15
+  (どのサーバプロセスがそのモデルを載せるかを ``serving_runtime`` で表す)
 """
 
 from __future__ import annotations
 
 import dataclasses
 import tomllib
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
+from typing import get_args
 
 import pytest
 
@@ -23,10 +27,13 @@ from llmkit.catalog import (
     MODEL_CATALOG,
     ModelRole,
     ModelSpec,
+    ServingRuntime,
     get_model_spec,
     known_model_ids,
     resolve_model_spec,
 )
+from llmkit.client import ApiStyle
+from llmkit.config import RuntimeKind
 from llmkit.errors import ConfigError
 
 _ROLES: tuple[ModelRole, ...] = ("generation", "embedding", "reranker")
@@ -38,14 +45,15 @@ CONFIG_PATHS = (
     REPO_ROOT / "configs" / "ollama_openai_compat.toml",
 )
 
-# 仕様書 (較正版) §4 T1「カタログを Phase 0 実測値で較正する」表と 1:1 で
-# 対応するゴールデン値。生成 3 モデルは実測フィット値、ruri 2 モデルは未実測の仮値。
+# 仕様書 (Phase 0 第2次実測版) §4 T1「カタログを第2次実測で較正する」表と 1:1 で
+# 対応するゴールデン値。生成 3 モデルは 2026-08-22 の線形フィット値、埋め込み・
+# リランカーは 2026-08-23 の同居実測での VRAM 増分そのもの (D-16)。
 GOLDEN_ROWS: tuple[tuple[str, str, str, float, float], ...] = (
     ("qwen3-14b", "generation", "Q4_K", 7.81, 0.1575),
     ("gpt-oss-20b", "generation", "MXFP4", 11.32, 0.0244),
     ("qwen3-8b", "generation", "Q4_K", 4.18, 0.1425),
-    ("ruri-v3-310m", "embedding", "fp16", 0.7, 0.0),
-    ("ruri-reranker", "reranker", "fp16", 0.8, 0.0),
+    ("ruri-v3-310m", "embedding", "unknown (GGUF)", 0.57, 0.0),
+    ("bge-reranker-v2-m3", "reranker", "Q6_K", 0.28, 0.0),
 )
 
 #: docs/phase0-vram-measurements.md の実測表のうち 100% GPU に収まった 8 点。
@@ -65,9 +73,22 @@ PHASE0_MEASUREMENTS: tuple[tuple[str, int, float], ...] = (
 #: (configs/*.toml の vram.runtime_overhead_gib と同じ値)。
 FIT_OVERHEAD_GIB = 0.8
 
-#: 較正済み (実測フィット) のモデルと、取得不能で未実測のままのモデル。
+#: 2026-08-22 の線形フィットで較正した生成モデル。
 CALIBRATED_MODEL_IDS = ("qwen3-14b", "gpt-oss-20b", "qwen3-8b")
-UNAVAILABLE_MODEL_IDS = ("ruri-v3-310m", "ruri-reranker")
+
+#: 2026-08-23 の第2次実測で較正した埋め込み・リランカー (旧 D-14 の対象)。
+ROUND2_MODEL_IDS = ("ruri-v3-310m", "bge-reranker-v2-m3")
+
+#: model_id -> そのモデルを載せるサーバプロセス (D-15)。
+EXPECTED_SERVING_RUNTIMES: Mapping[str, str] = MappingProxyType(
+    {
+        "qwen3-14b": "ollama",
+        "gpt-oss-20b": "ollama",
+        "qwen3-8b": "ollama",
+        "ruri-v3-310m": "ollama",
+        "bge-reranker-v2-m3": "llama_cpp_server",
+    }
+)
 
 
 def test_catalog_contains_exactly_the_documented_models() -> None:
@@ -113,20 +134,73 @@ def test_calibrated_models_cite_the_phase0_measurements(model_id: str) -> None:
     assert "(仮)" not in source_note
 
 
-@pytest.mark.parametrize("model_id", UNAVAILABLE_MODEL_IDS, ids=UNAVAILABLE_MODEL_IDS)
-def test_unavailable_models_declare_their_unavailability(model_id: str) -> None:
-    """D-14 guard: 取得できなかったモデルは仮値であることと理由を明示する。
+def test_no_catalog_entry_claims_to_be_unavailable() -> None:
+    """D-14 (撤回後) guard: カタログの全モデルが実測に裏付けられている。
 
-    Phase 0 で ruri 2 モデルは GGUF 非提供のため ``ollama pull`` できなかった。
-    カタログからは消さず (プロファイル定義と要件書の対応が切れるため)、較正済みの
-    3 モデルと同じ体裁で置かないことをここで固定する。
+    旧 D-14 は「ruri 2 モデルは取得不能。方式決定は Phase 3」だったが、
+    2026-08-23 の実機検証で前提が覆った (埋め込みは有志の GGUF 変換版で
+    ``ollama pull`` でき、リランカーは llama-server で動いた)。仮値を復活させる
+    根拠を残さないため、「取得不能」「(仮)」を書いた ``source_note`` を 1 件も
+    許さない側へ**強めて**再アンカーする。
+
+    リランカーは要件書第一候補の Ruri Reranker ではなく BGE Reranker v2-m3 を
+    採用したため、model_id もそれに揃える (``served_name`` だけ BGE で
+    ``model_id`` が ruri のままだと自己矛盾したマニフェストが残る)。
     """
+    for model_id in known_model_ids():
+        source_note = get_model_spec(model_id).source_note
+        assert "(仮)" not in source_note, model_id
+        assert "取得不能" not in source_note, model_id
+        assert "docs/phase0-vram-measurements.md" in source_note, model_id
+
+    assert "bge-reranker-v2-m3" in known_model_ids()
+    assert "ruri-reranker" not in known_model_ids()
+
+
+@pytest.mark.parametrize("model_id", ROUND2_MODEL_IDS, ids=ROUND2_MODEL_IDS)
+def test_phase0_round2_models_cite_the_2026_08_23_measurements(model_id: str) -> None:
+    """埋め込み・リランカーは第2次実測 (2026-08-23) を出典として書く。"""
     source_note = get_model_spec(model_id).source_note
 
-    assert "(仮)" in source_note
-    assert "取得不能" in source_note
-    assert "Phase 3" in source_note
-    assert "実測 2026-08-22" not in source_note
+    assert "実測 2026-08-23" in source_note
+
+
+def test_models_declare_the_runtime_that_serves_them() -> None:
+    """D-15 guard: 載せ先プロセスを ``serving_runtime`` で機械識別できる。
+
+    (a) カタログの 5 モデルが宣言どおりの載せ先を持ち、(b) passthrough 合成、
+    および外部 API で解決したカタログ登録済みモデルはいずれも ``external``
+    になり (未登録・登録済みの両方が D-15 の差し替えを守る)、(c)
+    ``ServingRuntime`` は ``RuntimeKind`` (接続単位のチャット送出経路) とも
+    ``ApiStyle`` (ワイヤプロトコル) とも別物である。
+
+    全件を ``"ollama"`` に潰すと (a) が落ちる。既定値を与えて新規モデルが黙って
+    Ollama 扱いになる事故は、ここと ``tests/test_manifest.py`` の E15 が捕まえる。
+    """
+    # (a) カタログ
+    assert {
+        model_id: get_model_spec(model_id).serving_runtime
+        for model_id in known_model_ids()
+    } == dict(EXPECTED_SERVING_RUNTIMES)
+    # 全件同じ値では「載せ先が分かれている」ことを主張できない
+    assert len(set(EXPECTED_SERVING_RUNTIMES.values())) > 1
+
+    # (b) passthrough (外部 API、カタログ未登録) はローカルのどのプロセスにも
+    # 載らない
+    assert (
+        resolve_model_spec("gpt-4o-mini", is_local=False).serving_runtime == "external"
+    )
+    # (b') カタログ登録済みモデルでも is_local=False では external に差し替わる
+    # (D-15 追記、F-6-001)。カタログ自体の宣言 (is_local=True 相当) は ollama
+    # のまま変わらないことも併せて固定する
+    assert resolve_model_spec("qwen3-14b", is_local=False).serving_runtime == "external"
+    assert get_model_spec("qwen3-14b").serving_runtime == "ollama"
+
+    # (c) 3 概念が別物であることを型レベルで固定する
+    serving_runtimes = set(get_args(ServingRuntime))
+    assert serving_runtimes == {"ollama", "llama_cpp_server", "external"}
+    assert serving_runtimes != set(get_args(RuntimeKind))
+    assert serving_runtimes != set(get_args(ApiStyle))
 
 
 @pytest.mark.parametrize(
@@ -219,6 +293,7 @@ def test_model_spec_declares_all_documented_fields() -> None:
         "model_id",
         "served_name",
         "role",
+        "serving_runtime",
         "quantization",
         "weights_gib",
         "kv_gib_per_1k_tokens",
@@ -232,16 +307,38 @@ def test_model_spec_declares_all_documented_fields() -> None:
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "is_local", [True, False], ids=["is_local=true", "is_local=false"]
-)
-def test_resolve_model_spec_returns_catalog_entry_when_registered(
-    is_local: bool,
-) -> None:
-    """カタログ登録済みモデルは is_local に関わらずカタログの値をそのまま返す。"""
-    spec = resolve_model_spec("qwen3-14b", is_local=is_local)
+def test_resolve_model_spec_returns_catalog_entry_verbatim_when_local() -> None:
+    """``is_local=True`` はカタログの :class:`ModelSpec` を
+    そのまま (同一オブジェクト) 返す。
+    """
+    spec = resolve_model_spec("qwen3-14b", is_local=True)
 
     assert spec is get_model_spec("qwen3-14b")
+
+
+def test_resolve_model_spec_marks_registered_model_external_when_remote() -> None:
+    """F-6-001: ``is_local=False`` はカタログ登録済みモデルでも ``serving_runtime``
+    を ``"external"`` に差し替える。
+
+    外部 API 実行では実際にローカルの Ollama / llama-server が載せているわけ
+    ではないため、カタログの値をそのまま返すと偽の主張になる (D-15 追記)。
+    ``weights_gib`` / ``kv_gib_per_1k_tokens`` は VRAM 見積りの挙動を変えない
+    ため、カタログ値のまま維持されるはず。
+    """
+    catalog_spec = get_model_spec("qwen3-14b")
+    spec = resolve_model_spec("qwen3-14b", is_local=False)
+
+    assert spec is not catalog_spec
+    assert spec.serving_runtime == "external"
+    assert spec.weights_gib == pytest.approx(catalog_spec.weights_gib)
+    assert spec.kv_gib_per_1k_tokens == pytest.approx(catalog_spec.kv_gib_per_1k_tokens)
+    assert spec.model_id == catalog_spec.model_id
+    assert spec.served_name == catalog_spec.served_name
+    assert spec.role == catalog_spec.role
+    assert spec.quantization == catalog_spec.quantization
+    assert spec.max_context_tokens == catalog_spec.max_context_tokens
+    # カタログ自体は書き換わらない (D-01: 静的テーブルが唯一の出典)
+    assert get_model_spec("qwen3-14b").serving_runtime == "ollama"
 
 
 def test_resolve_model_spec_raises_config_error_for_unregistered_model_when_local() -> (

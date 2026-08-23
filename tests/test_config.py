@@ -41,7 +41,7 @@ active_profile = "rag_default"
 [profiles.rag_default]
 generation = "qwen3-14b"
 embedding = "ruri-v3-310m"
-reranker = "ruri-reranker"
+reranker = "bge-reranker-v2-m3"
 """
 
 
@@ -73,7 +73,7 @@ def test_load_default_config_returns_app_config() -> None:
     assert config.profiles["rag_default"].model_ids() == (
         "qwen3-14b",
         "ruri-v3-310m",
-        "ruri-reranker",
+        "bge-reranker-v2-m3",
     )
     assert config.profiles["long_context"].model_ids() == ("gpt-oss-20b",)
 

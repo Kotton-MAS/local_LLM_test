@@ -23,6 +23,7 @@ import httpx
 import pytest
 
 from llmkit.bootstrap import bootstrap
+from llmkit.catalog import ModelSpec
 from llmkit.client import ChatMessage
 from llmkit.config import AppConfig, GenerationParams, load_config
 from llmkit.errors import ConfigError
@@ -33,7 +34,7 @@ from llmkit.manifest import (
     compute_config_sha256,
     write_manifest,
 )
-from llmkit.vram import estimate_resolved_profile, resolve_profile
+from llmkit.vram import ResolvedProfile, estimate_resolved_profile, resolve_profile
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
@@ -94,7 +95,9 @@ EXPECTED_SECTION_KEYS: Mapping[str, frozenset[str]] = {
         }
     ),
 }
-EXPECTED_MODEL_KEYS = frozenset({"model_id", "served_name", "role", "quantization"})
+EXPECTED_MODEL_KEYS = frozenset(
+    {"model_id", "served_name", "role", "serving_runtime", "quantization"}
+)
 
 
 def make_manifest(config: AppConfig, config_path: Path = DEFAULT_CONFIG) -> RunManifest:
@@ -345,10 +348,66 @@ def test_manifest_profile_lists_every_model_of_the_profile() -> None:
     assert [model["model_id"] for model in models] == [
         "qwen3-14b",
         "ruri-v3-310m",
-        "ruri-reranker",
+        "bge-reranker-v2-m3",
     ]
     assert models[0]["served_name"] == "qwen3:14b-q4_K_M"
     assert models[0]["quantization"] == "Q4_K"
+
+
+def recorded_serving_runtimes(
+    config: AppConfig, models: tuple[ModelSpec, ...], name: str
+) -> dict[str, str]:
+    """指定した ModelSpec 並びでマニフェストを組み、載せ先の記録を取り出す。"""
+    profile = ResolvedProfile(name=name, models=models)
+    estimate = estimate_resolved_profile(profile, config)
+    payload: object = json.loads(
+        build_manifest(config, profile, estimate, DEFAULT_CONFIG).to_json()
+    )
+    assert isinstance(payload, dict)
+    recorded = section({str(k): v for k, v in payload.items()}, "profile")["models"]
+    assert isinstance(recorded, list)
+    result: dict[str, str] = {}
+    for entry in recorded:
+        assert isinstance(entry, dict)
+        model_id = entry["model_id"]
+        serving_runtime = entry["serving_runtime"]
+        assert isinstance(model_id, str)
+        assert isinstance(serving_runtime, str)
+        result[model_id] = serving_runtime
+    return result
+
+
+def test_serving_runtime_change_is_visible_in_the_manifest() -> None:
+    """E15: ``ModelSpec.serving_runtime`` を変えるとマニフェストの記録も変わる。
+
+    ``serving_runtime`` を追加しただけでマニフェストに配線しないと、この属性は
+    Phase 3 まで誰にも観測されない飾りになる (D-15 が ``source_note`` に散文で
+    書く案を退けた理由が消える)。出荷設定では「リランカーだけ別プロセス」が
+    記録され、全件を同じ値に潰すとここが落ちる。
+    """
+    config = load_config(DEFAULT_CONFIG)
+    profile = resolve_profile(config)
+
+    shipped = recorded_serving_runtimes(config, profile.models, profile.name)
+
+    assert shipped == {
+        "qwen3-14b": "ollama",
+        "ruri-v3-310m": "ollama",
+        "bge-reranker-v2-m3": "llama_cpp_server",
+    }
+
+    # 掃引: カタログ側の値を変えると記録側も追随する (雛形の固定値ではない)
+    swept = recorded_serving_runtimes(
+        config,
+        tuple(
+            dataclasses.replace(spec, serving_runtime="external")
+            for spec in profile.models
+        ),
+        profile.name,
+    )
+
+    assert set(swept.values()) == {"external"}
+    assert swept != shipped
 
 
 # --------------------------------------------------------------------------

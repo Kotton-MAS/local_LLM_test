@@ -71,7 +71,7 @@ def test_bootstrap_logs_estimated_vram_usage(
 
     assert info_messages, "INFO ログが 1 件も出ていない"
     assert "rag_default" in combined
-    assert "12.63" in combined
+    assert "11.98" in combined
     assert "14.00" in combined
 
 
@@ -107,7 +107,7 @@ def test_oversized_profile_warns_and_aborts_without_http(
 ) -> None:
     """D-04 guard: 予算超過で (a) WARNING (b) 例外 (c) HTTP 0 回 の 3 つを満たす。
 
-    較正後は構成3 (oversized) を 131,072 トークンで使うと見積り 16.74 GiB となり、
+    較正後は構成3 (oversized) を 131,072 トークンで使うと見積り 16.09 GiB となり、
     **既定の ``vram.budget_gib`` (14.0) のまま**超過する。予算を下げる回避は使わない。
     """
     config_path = write_config_variant(
@@ -334,7 +334,7 @@ def test_cli_doctor_succeeds_against_a_reachable_runtime(tmp_path: Path) -> None
 
     assert code == 0, err
     assert "rag_default" in out
-    assert "12.63" in out
+    assert "11.98" in out
     assert "qwen3:14b-q4_K_M" in out
     assert len(requests) == 1
     assert len(list(output_dir.glob("*.json"))) == 1

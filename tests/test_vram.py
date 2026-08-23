@@ -1,9 +1,11 @@
 """VRAM プロファイル見積り (llmkit/vram.py) のテスト。
 
-このファイルは 2 つの guard_test を含む:
+このファイルは 3 つの guard_test を含む:
 
 - ``test_estimate_is_pure_and_needs_no_gpu`` … D-01 (静的テーブルのみで見積もる)
 - ``test_all_vram_values_are_gib``           … D-03 (単位は GiB に統一する)
+- ``test_estimate_reproduces_the_configuration1_coresidency_measurement`` … D-16
+  (別プロセスが確保する分も合算し、構成1 の同居実測を再現する)
 """
 
 from __future__ import annotations
@@ -32,15 +34,16 @@ from llmkit.vram import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
+EXTERNAL_CONFIG = REPO_ROOT / "configs" / "external_openai.toml"
 
 #: 較正後の出荷プロファイル見積り (GiB)。出典は docs/phase0-vram-measurements.md
 #: の実測フィット値であり、要件書の帯ではない。
 #: (プロファイル名, context_tokens, 合計 GiB, 既定予算 14.0 に収まるか)
 SHIPPED_PROFILE_ESTIMATES: tuple[tuple[str, int, float, bool], ...] = (
-    ("rag_default", 16384, 12.63, True),
+    ("rag_default", 16384, 11.98, True),
     ("long_context", 65536, 13.68, True),
     ("long_context", 131072, 15.24, False),
-    ("oversized", 131072, 16.74, False),
+    ("oversized", 131072, 16.09, False),
 )
 
 #: 実測でオフロードが始まらない増分の上限として設定した既定予算 (D-12)。
@@ -51,6 +54,7 @@ HUGE_MODEL = ModelSpec(
     model_id="test-huge-20gib",
     served_name="test-huge:20gib",
     role="generation",
+    serving_runtime="ollama",
     quantization="none",
     weights_gib=20.0,
     kv_gib_per_1k_tokens=0.0,
@@ -102,7 +106,7 @@ def test_resolve_profile_defaults_to_active_profile(config: AppConfig) -> None:
     profile = resolve_profile(config)
 
     assert profile.name == "rag_default"
-    assert profile.model_ids == ("qwen3-14b", "ruri-v3-310m", "ruri-reranker")
+    assert profile.model_ids == ("qwen3-14b", "ruri-v3-310m", "bge-reranker-v2-m3")
     assert profile.generation.model_id == "qwen3-14b"
 
 
@@ -162,10 +166,39 @@ def test_resolve_profile_allows_passthrough_model_for_remote_runtime(
 
     estimate = estimate_resolved_profile(profile, remote_external, context_tokens=16384)
     expected_embedding_reranker = get_model_spec("ruri-v3-310m").weights_gib + (
-        get_model_spec("ruri-reranker").weights_gib
+        get_model_spec("bge-reranker-v2-m3").weights_gib
     )
     assert estimate.weights_total_gib == pytest.approx(expected_embedding_reranker)
     assert estimate.kv_cache_gib == pytest.approx(0.0)
+
+
+def test_resolve_profile_marks_catalog_models_external_for_shipped_external_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F-6-001 掃引: 出荷済み外部 API 構成 (``configs/external_openai.toml``) は
+    カタログ登録済みモデルであっても ``serving_runtime`` を ``"external"`` に
+    差し替える。
+
+    ``rag_default`` の生成・埋め込み・リランカーはいずれもカタログ登録済み
+    (``qwen3-14b`` / ``ruri-v3-310m`` / ``bge-reranker-v2-m3``) であり、
+    どれか 1 つでもカタログ値 (``ollama`` / ``llama_cpp_server``) のまま
+    漏れるとこのテストが落ちる。``weights_gib`` はカタログ値のまま維持され、
+    VRAM 見積り (``test_estimate_follows_the_documented_formula`` 等) に
+    影響しないことも併せて固定する。
+    """
+    monkeypatch.setenv("LLMKIT_API_KEY", "sk-test-do-not-leak-0123456789")
+    external_config = load_config(EXTERNAL_CONFIG)
+    profile = resolve_profile(external_config)
+
+    assert profile.model_ids == ("qwen3-14b", "ruri-v3-310m", "bge-reranker-v2-m3")
+    assert {spec.serving_runtime for spec in profile.models} == {"external"}
+
+    for spec in profile.models:
+        catalog_spec = get_model_spec(spec.model_id)
+        assert spec.weights_gib == pytest.approx(catalog_spec.weights_gib)
+        assert spec.kv_gib_per_1k_tokens == pytest.approx(
+            catalog_spec.kv_gib_per_1k_tokens
+        )
 
 
 # --------------------------------------------------------------------------
@@ -179,7 +212,7 @@ def test_estimate_follows_the_documented_formula(config: AppConfig) -> None:
 
     expected_weights = sum(
         get_model_spec(model_id).weights_gib
-        for model_id in ("qwen3-14b", "ruri-v3-310m", "ruri-reranker")
+        for model_id in ("qwen3-14b", "ruri-v3-310m", "bge-reranker-v2-m3")
     )
     expected_kv = get_model_spec("qwen3-14b").kv_gib_per_1k_tokens * (16384 / 1024)
 
@@ -189,8 +222,8 @@ def test_estimate_follows_the_documented_formula(config: AppConfig) -> None:
     assert estimate.total_gib == pytest.approx(expected_weights + expected_kv + 0.8)
     assert estimate.weights_gib == {
         "qwen3-14b": pytest.approx(7.81),
-        "ruri-v3-310m": pytest.approx(0.7),
-        "ruri-reranker": pytest.approx(0.8),
+        "ruri-v3-310m": pytest.approx(0.57),
+        "bge-reranker-v2-m3": pytest.approx(0.28),
     }
 
 
@@ -263,6 +296,65 @@ def test_overhead_changes_estimate(config: AppConfig) -> None:
 
 
 # --------------------------------------------------------------------------
+# 構成1 の同居実測 (D-16 guard / E14)
+# --------------------------------------------------------------------------
+
+#: docs/phase0-vram-measurements.md「構成1 の同居実測 (2026-08-23)」の 4 段階。
+#: いずれも nvidia-smi が返すデバイス全体の使用量 (GiB 累計) であり、
+#: プロセス単位の値ではない。
+MEASURED_IDLE_GIB = 0.56
+MEASURED_PLUS_RERANKER_GIB = 0.84
+MEASURED_PLUS_GENERATION_GIB = 11.96
+MEASURED_PLUS_EMBEDDING_GIB = 12.53
+
+#: 予算判定の対象となる「増分」。アイドル分は含めない (D-12)。
+MEASURED_INCREMENT_GIB = MEASURED_PLUS_EMBEDDING_GIB - MEASURED_IDLE_GIB
+
+
+def test_estimate_reproduces_the_configuration1_coresidency_measurement(
+    config: AppConfig,
+) -> None:
+    """D-16 guard / E14: 構成1 の同居実測 (2026-08-23) を見積りが再現する。
+
+    - アイドル 0.56 GiB は増分予算に含めない (D-12: budget_gib は「実測で
+      オフロードが始まらない**増分**の上限」)。
+    - リランカーは Ollama ではなく llama-server (別プロセス) が確保するが、
+      判定対象は nvidia-smi が返すデバイス全体の使用量でプロセス境界と無関係
+      なため、単純に合算する (D-16)。``llmkit/vram.py`` の式は変更しない。
+    - 埋め込み・リランカーの ``weights_gib`` は純粋な重みではなく、自ランタイムの
+      オーバーヘッドを含む実測 VRAM 増分そのもの。片方でも旧仮値 (0.7 / 0.8) に
+      戻すと、合計と成分の両方でこのテストが落ちる。
+    """
+    reranker_increment = MEASURED_PLUS_RERANKER_GIB - MEASURED_IDLE_GIB
+    generation_increment = MEASURED_PLUS_GENERATION_GIB - MEASURED_PLUS_RERANKER_GIB
+    embedding_increment = MEASURED_PLUS_EMBEDDING_GIB - MEASURED_PLUS_GENERATION_GIB
+
+    # 実測 4 段が自己整合している (段ごとの増分の和 = 全体の増分)
+    assert reranker_increment + generation_increment + embedding_increment == (
+        pytest.approx(MEASURED_INCREMENT_GIB)
+    )
+
+    estimate = estimate_profile(config, "rag_default", context_tokens=16384)
+
+    # 合計: 予測 11.98 vs 実測増分 11.97
+    assert estimate.total_gib == pytest.approx(MEASURED_INCREMENT_GIB, abs=0.02)
+
+    # 成分ごとにも一致する (合計だけ合わせた偶然の一致ではない)
+    assert estimate.weights_gib["bge-reranker-v2-m3"] == pytest.approx(
+        reranker_increment, abs=0.005
+    )
+    assert estimate.weights_gib["ruri-v3-310m"] == pytest.approx(
+        embedding_increment, abs=0.005
+    )
+    generation_total = (
+        estimate.weights_gib["qwen3-14b"]
+        + estimate.kv_cache_gib
+        + estimate.runtime_overhead_gib
+    )
+    assert generation_total == pytest.approx(generation_increment, abs=0.02)
+
+
+# --------------------------------------------------------------------------
 # 予算判定
 # --------------------------------------------------------------------------
 
@@ -301,22 +393,22 @@ def test_synthetic_oversized_profile_raises_with_full_breakdown(
 def test_budget_threshold_changes_verdict(config: AppConfig) -> None:
     """E4: 同一プロファイル・同一カタログで budget_gib だけを変えると判定が反転する。
 
-    較正後の rag_default @16384 の見積りは 12.63 GiB (= 9.31 + 2.52 + 0.8)。
-    既定予算 14.0 では収まり、見積り値の直下 12.0 に下げると 0.63 GiB 超過する。
+    較正後の rag_default @16384 の見積りは 11.98 GiB (= 8.66 + 2.52 + 0.8)。
+    既定予算 14.0 では収まり、見積り値の直下 11.5 に下げると 0.48 GiB 超過する。
     """
     profile = resolve_profile(config, "rag_default")
     baseline = estimate_resolved_profile(profile, config, context_tokens=16384)
-    assert baseline.total_gib == pytest.approx(12.63)
+    assert baseline.total_gib == pytest.approx(11.98)
 
     generous = with_vram(config, budget_gib=14.0)
-    strict = with_vram(config, budget_gib=12.0)
+    strict = with_vram(config, budget_gib=11.5)
 
     assert check_budget(profile, generous, context_tokens=16384).within_budget
 
     with pytest.raises(VramBudgetExceededError) as excinfo:
         check_budget(profile, strict, context_tokens=16384)
 
-    assert excinfo.value.excess_gib == pytest.approx(0.63)
+    assert excinfo.value.excess_gib == pytest.approx(0.48)
 
 
 def test_budget_reflects_the_measured_gpu_resident_ceiling(config: AppConfig) -> None:

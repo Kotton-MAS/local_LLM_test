@@ -55,11 +55,19 @@ _FILENAME_TIMESTAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 @dataclass(frozen=True, slots=True)
 class ManifestModelEntry:
-    """プロファイルを構成する 1 モデルの記録。"""
+    """プロファイルを構成する 1 モデルの記録。
+
+    ``serving_runtime`` は「どのサーバプロセスがそのモデルを載せたか」
+    (:data:`llmkit.catalog.ServingRuntime`) の記録である。Phase 1 では
+    ディスパッチに使わないが、マニフェストに残さないと Phase 2 の比較記録から
+    「リランカーだけ別プロセスだった」ことが読めなくなる (D-15、仕様書 §5
+    有効性観点 E15)。
+    """
 
     model_id: str
     served_name: str
     role: ModelRole
+    serving_runtime: str
     quantization: str
 
     def to_dict(self) -> dict[str, object]:
@@ -67,6 +75,7 @@ class ManifestModelEntry:
             "model_id": self.model_id,
             "served_name": self.served_name,
             "role": self.role,
+            "serving_runtime": self.serving_runtime,
             "quantization": self.quantization,
         }
 
@@ -251,6 +260,7 @@ def build_manifest(
                     model_id=spec.model_id,
                     served_name=spec.served_name,
                     role=spec.role,
+                    serving_runtime=spec.serving_runtime,
                     quantization=spec.quantization,
                 )
                 for spec in profile.models

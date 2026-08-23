@@ -4,16 +4,20 @@ VRAM 見積りの唯一の出典はこの静的テーブルであり、実行時
 実測値を参照しない (D-01)。数値はすべて **GiB** で持つ (D-03)。
 
 生成 3 モデルの値は ``docs/phase0-vram-measurements.md`` (2026-08-22 実測) の
-線形フィット結果で較正済み。埋め込み・リランカーは取得不能のため `(仮)` のまま
-残す (``source_note`` に理由を明記する)。更新するときは ``source_note`` に実測日と
-出典を書くこと。
+線形フィット結果で較正済み。埋め込み・リランカーは 2026-08-23 の第2次実測で較正した
+(D-14 撤回)。更新するときは ``source_note`` に実測日と出典を書くこと。
+
+``serving_runtime`` は「そのモデルを載せるサーバプロセス」を表すモデル単位の静的
+メタデータであり、``config.RuntimeKind`` (接続単位のチャット送出経路) とも
+``client.ApiStyle`` (ワイヤプロトコル) とも直交する (D-15)。Phase 1 ではディスパッチに
+使わず、実行マニフェストに記録するだけである。
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Literal
 
@@ -25,12 +29,18 @@ __all__ = [
     "MODEL_CATALOG",
     "ModelRole",
     "ModelSpec",
+    "ServingRuntime",
     "get_model_spec",
     "known_model_ids",
     "resolve_model_spec",
 ]
 
 ModelRole = Literal["generation", "embedding", "reranker"]
+
+#: そのモデルを実際に載せるサーバプロセス (D-15)。既定値は与えない。
+#: 既定を ``"ollama"`` にすると、将来追加されるモデルが黙って Ollama 扱いになり、
+#: 2026-08-23 に検出した誤り (Ollama にリランキング API が無い) を再生産する。
+ServingRuntime = Literal["ollama", "llama_cpp_server", "external"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,8 +51,12 @@ class ModelSpec:
         model_id: 設定ファイルが参照する論理名。
         served_name: 推論ランタイムに送る実名 (例 ``qwen3:14b-q4_K_M``)。
         role: プロファイル内での役割。
+        serving_runtime: このモデルを載せるサーバプロセス (D-15)。
         quantization: 量子化方式。
-        weights_gib: 重みが占める VRAM (GiB)。
+        weights_gib: このモデルが占める VRAM (GiB)。生成モデルは重みのみ
+            (KV とランタイムのオーバーヘッドは見積り式が別に足す) だが、埋め込み・
+            リランカーは自ランタイムのオーバーヘッドを含む実測 VRAM 増分そのもの
+            (D-16)。
         kv_gib_per_1k_tokens: コンテキスト 1024 トークンあたりの KV キャッシュ (GiB)。
         max_context_tokens: モデルが受け付ける最大コンテキスト長。
         source_note: 数値の根拠 (要件書の該当行 / 仮置きである旨)。
@@ -51,6 +65,7 @@ class ModelSpec:
     model_id: str
     served_name: str
     role: ModelRole
+    serving_runtime: ServingRuntime
     quantization: str
     weights_gib: float
     kv_gib_per_1k_tokens: float
@@ -63,6 +78,7 @@ _SPECS: tuple[ModelSpec, ...] = (
         model_id="qwen3-14b",
         served_name="qwen3:14b-q4_K_M",
         role="generation",
+        serving_runtime="ollama",
         quantization="Q4_K",
         weights_gib=7.81,
         kv_gib_per_1k_tokens=0.1575,
@@ -77,6 +93,7 @@ _SPECS: tuple[ModelSpec, ...] = (
         model_id="gpt-oss-20b",
         served_name="gpt-oss:20b",
         role="generation",
+        serving_runtime="ollama",
         quantization="MXFP4",
         weights_gib=11.32,
         kv_gib_per_1k_tokens=0.0244,
@@ -92,6 +109,7 @@ _SPECS: tuple[ModelSpec, ...] = (
         model_id="qwen3-8b",
         served_name="qwen3:8b-q4_K_M",
         role="generation",
+        serving_runtime="ollama",
         quantization="Q4_K",
         weights_gib=4.18,
         kv_gib_per_1k_tokens=0.1425,
@@ -104,31 +122,45 @@ _SPECS: tuple[ModelSpec, ...] = (
     ),
     ModelSpec(
         model_id="ruri-v3-310m",
-        served_name="hf.co/cl-nagoya/ruri-v3-310m",
+        served_name="hf.co/Targoyle/ruri-v3-310m-GGUF",
         role="embedding",
-        quantization="fp16",
-        weights_gib=0.7,
+        serving_runtime="ollama",
+        quantization="unknown (GGUF)",
+        weights_gib=0.57,
         kv_gib_per_1k_tokens=0.0,
         max_context_tokens=8192,
         source_note=(
-            "(仮) 取得不能: GGUF 非提供のため ollama pull できない "
-            "(Phase 0 実測で確認)。weights_gib は 310M パラメータ x 2 byte "
-            "からの未実測の仮値。方式は Phase 3 で決定する"
+            "実測 2026-08-23 / docs/phase0-vram-measurements.md。"
+            "元リポジトリ (sentence-transformers 形式) は ollama pull できないが、"
+            "有志の GGUF 変換版なら Ollama で扱える (336 MB、埋め込み"
+            "エンドポイントが 768 次元を返す)。"
+            "weights_gib=0.57 は純粋な重みではなく、Ollama にロードしたときの"
+            "実測 VRAM 増分そのもの (自ランタイムのオーバーヘッド込み、D-16)。"
+            "量子化方式は配布側のタグから未確認のため unknown (GGUF) とする。"
+            "max_context_tokens=8192 はモデルカード由来で未実測"
         ),
     ),
     ModelSpec(
-        model_id="ruri-reranker",
-        served_name="hf.co/cl-nagoya/ruri-reranker-large",
+        model_id="bge-reranker-v2-m3",
+        served_name="bge-reranker-v2-m3-Q6_K.gguf",
         role="reranker",
-        quantization="fp16",
-        weights_gib=0.8,
+        serving_runtime="llama_cpp_server",
+        quantization="Q6_K",
+        weights_gib=0.28,
         kv_gib_per_1k_tokens=0.0,
-        max_context_tokens=512,
+        max_context_tokens=8192,
         source_note=(
-            "(仮) 取得不能: GGUF 非提供のため ollama pull できない "
-            "(Phase 0 実測で確認。Ollama にリランキング API 自体が無い)。"
-            "重み・served_name・最大コンテキストはいずれも未実測の仮値。"
-            "方式は Phase 3 で決定する"
+            "実測 2026-08-23 / docs/phase0-vram-measurements.md。"
+            "要件書第一候補の Ruri Reranker は GGUF 非提供のため、要件書が代替と"
+            "して挙げる BGE Reranker v2-m3 を採用した。Ollama にはリランキング "
+            "API が無い (native・OpenAI 互換のどちらの経路でも 404) ため "
+            "llama.cpp の llama-server (Vulkan) を別ポートで併走させる (D-15)。"
+            "weights_gib=0.28 は純粋な重みではなく、llama-server 自身の"
+            "オーバーヘッドを含む実測 VRAM 増分そのもの (D-16)。"
+            "測定条件は --ctx-size 2048 / --n-gpu-layers 99 の 1 点のみで、"
+            "ctx-size を上げるとこの値は過小評価になる。"
+            "max_context_tokens=8192 は BGE Reranker v2-m3 系列の上限として"
+            "記載したもので未実測"
         ),
     ),
 )
@@ -182,7 +214,15 @@ def resolve_model_spec(
 ) -> ModelSpec:
     """model_id を :class:`ModelSpec` に解決する (``get_model_spec`` の拡張版)。
 
-    カタログ登録済みならそのまま返す (``is_local`` に関わらず同じ挙動)。
+    カタログ登録済みの場合:
+
+    - ``is_local=True`` ではカタログの :class:`ModelSpec` をそのまま返す。
+    - ``is_local=False`` (外部 API) では ``serving_runtime`` だけ ``"external"``
+      に差し替えて返す (``weights_gib`` / ``kv_gib_per_1k_tokens`` を含む他の
+      フィールドはカタログ値のまま維持し、VRAM 見積りの挙動は変えない)。
+      これをしないと、外部 API 実行のマニフェストに『ローカルの Ollama /
+      llama-server が載せている』という偽の主張が残る (F-6-001、D-15 追記)。
+
     カタログ未登録の場合:
 
     - ``is_local=True`` (ローカル VRAM を使う実行) では ``get_model_spec`` と
@@ -215,7 +255,13 @@ def resolve_model_spec(
     """
     spec = MODEL_CATALOG.get(model_id)
     if spec is not None:
-        return spec
+        if is_local:
+            return spec
+        # 外部 API 実行では、カタログ登録済みモデルであっても実際に載せて
+        # いるのはローカルの Ollama / llama-server ではない (F-6-001)。
+        # weights_gib / kv_gib_per_1k_tokens はカタログ値のまま維持する
+        # (D-16 の合算式・VRAM 見積りの挙動を変えないため)。
+        return replace(spec, serving_runtime="external")
     if is_local:
         return get_model_spec(model_id)
     logger.debug(
@@ -228,6 +274,7 @@ def resolve_model_spec(
         model_id=model_id,
         served_name=model_id,
         role=role,
+        serving_runtime="external",
         quantization=_PASSTHROUGH_QUANTIZATION,
         weights_gib=0.0,
         kv_gib_per_1k_tokens=0.0,
