@@ -106,3 +106,33 @@
 | INFO | F-9-027 | reviewer-style | `rag/settings.py:48` | `NonEmptyStr` / `PositiveInt` / `PositiveFloat` の型エイリアスが `llmkit/config.py` / `harness/suite.py` に続き3重複製 |
 | INFO | F-9-031 | reviewer-test | `rag/parser.py:173` | frontmatter パース中の「空行または `#` コメント行をスキップ」分岐が未到達 (テストデータに該当ケース無し) |
 | INFO | F-9-032 | reviewer-uv | `docs/plans/2026-08-23-phase3-indexing.md` | 3b で Chroma 導入 (D-26) を検討する際の依存数見積りが read-only 権限のため transitive 総数まで測定できていない |
+
+## Phase 3b (索引・差分更新・CLI) の申し送り (2026-08-23 追記)
+
+出典: `docs/plans/2026-08-23-phase3b-indexing.md` §9 (T4〜T7 の実装者が残した判断 54 件と申し送り) と T8 の実測。
+本 PR (3b) で対応済みのものは行末に **対応済み** と書く。以下は**次サイクル以降**の候補。
+
+### 1. 仕様と食い違う実装 / 承認が要る変更 (次の周で必ず判断する)
+
+| 優先 | 箇所 | 内容 |
+|---|---|---|
+| HIGH | `tests/test_rag_layout.py:85` (`_FILESYSTEM_READ_ALLOWANCES`) | §9 T4 決定2。仕様は `test_rag_layout.py` の変更を `_SUBMODULE_NAMES` だけに許していたが、D-30 の構造層 guard が `read_text` を名前ベースで一律に落とすため、索引ファイルを読む `store.py` / `indexer.py` は許可を足さないと**原理的に緑にならない**。許可リストは読むモジュールが増えるたびに伸びる。**T8 で D-30 の rule 本文を実際の許可内容へ書き直した (対応済み)** が、「許可リストを伸ばし続ける設計でよいか」は未判断。代案は `rag/store.py` / `rag/indexer.py` の読み書きを 1 モジュール (例 `rag/artifacts.py`) に閉じて許可を 1 件に戻すこと |
+| HIGH | `tests/test_rag_layout.py::test_every_rag_submodule_is_covered_by_the_union_check` | §9 T7 決定1。`rag/cli.py` を作った時点でこのテストは原理的に落ちるため、右辺を `set(_SUBMODULE_NAMES)` → `{*_SUBMODULE_NAMES, "cli"}` に変えた (`_SUBMODULE_NAMES` 自体は無変更)。**指示で許されていない既存テストの編集**であり、承認または再設計 (「公開 API を持たない入口モジュール」の表を別に持つ等) が要る |
+| HIGH | `rag/cli.py` `main()` の注入点 | §9 T7 決定2。仕様は `main(argv, *, http_client=None, embedding_client=None, ...)` だったが、`http_client: httpx.Client \| None` と書くと `rag/cli.py` が `httpx` を import することになり **D-25 guard が落ちる**ため `embedding_client` 1 つにした。**仕様と明示的に食い違う唯一の点**。恒久策は「`rag` に `httpx` の型だけを持ち込める例外を D-25 に作る」か「注入点を `embedding_client` に一本化すると仕様側を直す」かの二択 |
+
+### 2. 型・API の整理 (3b では意図的に見送った)
+
+| 優先 | 箇所 | 内容 |
+|---|---|---|
+| MEDIUM | `rag/chunker.py` `Chunk.embed_text` | 仕様 §4 論点3 / ユーザー確定事項 Q3 = (a)。3b では**永続化から外す**に留めた (D-41)。完全な解は `@property` 化だが `Chunk` に `heading_separator` フィールドが要り、`rag.__all__` の公開型変更になる。既存テストは `Chunk(...)` を直接構築しておらず属性アクセスのみなので**次サイクルで安全に実施できる** |
+| MEDIUM | `rag/parser.py` `ParsedNote.frontmatter` (F-9-003 の再掲) | 仕様 §4 論点4。型注釈は `Mapping` だが実体は可変な生 `dict` で、frozen の保証が境界で破れる (`hash()` も `TypeError`)。3b は差分判定をバイト列の sha256 だけで行う (D-36) ため `ParsedNote` の同一性を 1 か所も使っておらず、**guard_test を書ける形にならない**ので決定にせず見送った。次サイクルで検索結果のキャッシュキーに使うなら、その時点で不変化と guard_test をセットで入れる |
+| MEDIUM | `rag/indexer.py` `IndexPlan` | 仕様 §4 論点6 の脚注 / §9 T7 決定4。`--dry-run` が「予定リクエスト数」を出せない。正確に出すには CLI が `parse_note` → `chunk_note` を回すことになり `build_index` の前半を二重実装する (D-27 の趣旨に反する)。正しい置き場所は `plan_index` が返す `IndexPlan` に `pending_chunk_counts` (再処理対象ノートごとのチャンク数) を持たせること。**リクエスト数 = ⌈合計 / batch_size⌉ を CLI が計算できるようになる** |
+| INFO | `rag/vault.py:50` `VaultFile.mtime_ns` / `size` | D-36 (差分判定はバイト列の sha256 だけ) を採ったため、この 2 フィールドは `rag/` の中で**1 度も読まれていない** (実測: 生成箇所以外の参照 0 件)。しかも docstring が「差分更新の高速経路に使う (3b / D-29)」と書いており、**D-29 は `decisions.yaml` に一度も存在しない欠番**を指している。フィールドを消すか、docstring を「列挙の副産物であって索引は読まない」に直すか (D-36 の rationale と揃える) |
+
+### 3. 構造・運用 (実測から出たもの)
+
+| 優先 | 箇所 | 内容 |
+|---|---|---|
+| MEDIUM | `rag/indexer.py` (1,123 行) | fingerprint / マニフェスト / 計画 (`plan_index`) / 実行 (`build_index`) の **4 責務が 1 モジュールに同居**している (`rag/` 全体 3,518 行の 32%)。分割の自然な線は「再現条件とマニフェスト (読み書き)」と「計画と実行」。ただし `rag/__init__.py` の再エクスポートと `_SUBMODULE_NAMES` / `_FILESYSTEM_READ_ALLOWANCES` に波及するため、上記 1. の判断と同時に行うのが安い |
+| MEDIUM | `rag/cli.py` `--rebuild` | §9 T7 決定9。`--rebuild` は `load_manifest` を呼ばないので**壊れた `manifest.json` からは復帰できるが、壊れた `chunks.jsonl` からは復帰できない** (`JsonlVectorStore` の生成時読み込みが `ConfigError` になる)。塞ぐには「空のストアから始める」入口が `rag/store.py` に要る。現状の逃げ道は「索引ディレクトリを手で消す」で、CLI のメッセージにその案内が無い |
+| INFO | `rag/indexer.py` の正規化 JSON sha256 | 仕様 §3 ソフト制約で `harness/runner.py` との 3 行重複を許容した (層構造上 `rag` は `harness` を import できない)。両者が同じ dict に同じ digest を返すことはテストで固定済み。共通化するなら置き場所は `llmkit` になるが、「推論ランタイムの抽象」という `llmkit` の責務からは外れる |

@@ -164,7 +164,11 @@ class RagSettings:
         exclude_globs: ホワイトリストから落とすパターン。
         chunk: チャンク分割の設定。
         embed: 埋め込み呼び出しの設定。
-        source_path: この設定を読み込んだ TOML のパス。
+        source_path: この設定を読み込んだ TOML のパス (``expanduser().resolve()``
+            済み)。正規化するのは、``vaults/sample.toml`` と絶対パスで読んだ
+            結果が等価にならないと索引の再現条件が起動ディレクトリに依存する
+            ため。正規化しないと 2 つの実行が「同じ設定」と判定されず、
+            差分更新が全再構築に化ける。
     """
 
     vault_id: str
@@ -249,6 +253,55 @@ def _validate_index_dir(index_dir: Path, vault_dir: Path, configured: str) -> No
                 "変更してください。vault は読み取り専用として扱います"
             ),
         )
+    _reject_tracked_index_dir(index_dir, configured)
+
+
+# リポジトリ内で索引の出力を許す唯一の場所。.gitignore の data/ と対応する。
+_IGNORED_OUTPUT_PREFIX = "data"
+
+
+def _repository_root(start: Path) -> Path | None:
+    """``.git`` を上に辿ってリポジトリルートを返す。無ければ ``None``。
+
+    ``git`` コマンドを起動しないのは、設定の検証がコマンドの有無や実行環境に
+    依存すると CI とローカルで結果が変わるため。``.git`` の有無だけなら
+    決定論的に判定できる。
+    """
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _reject_tracked_index_dir(index_dir: Path, configured: str) -> None:
+    """索引の出力先がリポジトリ内の追跡され得る場所でないことを確かめる。
+
+    索引のチャンクは vault 本文の逐語コピーである。このリポジトリは PUBLIC
+    なので、実 vault を索引しつつ出力先をリポジトリ内 (``data/`` 以外) に
+    向けると、個人ノートの本文がそのままコミットされる。キットの自動コミットは
+    ``git add -A`` で人手の判断を挟まないため、気づく機会が無い。
+
+    ``.gitignore`` に頼らないのは、出力先の安全性が「別ファイルの内容」に
+    暗黙に依存する状態になるため。設定を読んだ時点で落とす。
+    """
+    root = _repository_root(index_dir if index_dir.exists() else index_dir.parent)
+    if root is None:
+        return  # リポジトリの外なら、この観点では自由
+    if root not in index_dir.parents and root != index_dir:
+        return
+    allowed = root / _IGNORED_OUTPUT_PREFIX
+    if index_dir == allowed or allowed in index_dir.parents:
+        return
+    msg = f"index.dir がリポジトリ内の追跡され得る場所に解決されました: {configured}"
+    raise ConfigError(
+        msg,
+        remediation=(
+            f"索引の出力先を {_IGNORED_OUTPUT_PREFIX}/ 配下 "
+            f"(例: {_IGNORED_OUTPUT_PREFIX}/index/<vault.id>) か、"
+            "リポジトリの外に変更してください。索引はノート本文を全量"
+            "保持するため、追跡されると本文がそのまま公開されます"
+        ),
+    )
 
 
 def load_settings(path: Path) -> RagSettings:
@@ -294,5 +347,5 @@ def load_settings(path: Path) -> RagSettings:
         exclude_globs=tuple(raw.vault.exclude_globs),
         chunk=raw.chunk,
         embed=raw.embed,
-        source_path=path,
+        source_path=path.expanduser().resolve(),
     )

@@ -5,10 +5,11 @@
 - 静的: ``test_no_vault_module_calls_a_write_api`` (D-30 guard / AST)
 - 動的: ``test_indexing_leaves_every_vault_file_byte_identical`` (D-30 guard)
 
-動的側は本サイクル時点ではまだ索引本体が無いため、**vault 全体をパースする
-処理**の前後でスナップショットを比較する。3b で索引本体に差し替える。
-スナップショットは ``(相対パス, size, st_mtime_ns, st_mode, sha256)`` の集合で、
-エントリの増減も見る。``st_atime`` は読み取りで必ず変わるため比較しない。
+動的側は **索引本体 (``rag.build_index``) を実際に回した前後**でスナップショット
+を比較する (3b T6 で「vault 全体のパース」から差し替えた。パースだけでは、
+索引が書き出しの段階で vault に触れても検出できない)。スナップショットは
+``(相対パス, size, st_mtime_ns, st_mode, sha256)`` の集合で、エントリの増減も
+見る。``st_atime`` は読み取りで必ず変わるため比較しない。
 """
 
 from __future__ import annotations
@@ -21,8 +22,9 @@ import stat
 from pathlib import Path
 
 import pytest
-from conftest import write_rag_settings
+from conftest import DEFAULT_CONFIG, fake_embedding_transport, write_rag_settings
 
+import llmkit
 import rag
 from llmkit import ConfigError
 
@@ -89,8 +91,10 @@ def snapshot_tree(root: Path) -> dict[str, Fingerprint]:
 def parse_whole_vault(settings: rag.RagSettings) -> list[rag.ParsedNote]:
     """索引処理が vault に対して行う読み取りを一通り行う。
 
-    3b では ``build_index`` に差し替える。読み取り経路 (列挙 → バイト列 →
-    テキスト → パース) をすべて通すことが目的。
+    読み取り経路 (列挙 → バイト列 → テキスト → パース) をすべて通すことが
+    目的。D-30 の動的 guard は 3b で :func:`rag.build_index` に差し替えたが、
+    「読み取りだけを回す」ことに意味のある検査 (権限・シンボリックリンク) は
+    引き続きこのヘルパを使う。
     """
     parsed: list[rag.ParsedNote] = []
     for entry in rag.iter_vault_files(settings):
@@ -182,14 +186,37 @@ def test_the_write_api_guard_actually_detects_a_write() -> None:
 def test_indexing_leaves_every_vault_file_byte_identical(
     sample_vault_copy: Path,
 ) -> None:
-    """D-30 guard (動的): 読み取り処理の前後で vault が完全に一致する。"""
+    """D-30 guard (動的): **索引を実行した**前後で vault が完全に一致する。
+
+    3a では索引本体がまだ無く、vault 全体のパースで代用していた。3b でその
+    本体 (:func:`rag.build_index`) ができたので、実際に 11 ノートを読み・
+    チャンクへ分割し・埋め込み・``index_dir`` へ書き出す経路を回す。パース
+    だけを回していると、**書き出しの段階で vault に触れる**実装 (例: 一時
+    ファイルを vault の隣に作る) を 1 つも検出できない。
+    """
     settings = rag.load_settings(write_rag_settings(sample_vault_copy.parent))
+    config = llmkit.load_config(DEFAULT_CONFIG)
     before = snapshot_tree(sample_vault_copy)
 
-    parsed = parse_whole_vault(settings)
+    transport = fake_embedding_transport()
+    with transport.client() as http_client:
+        result = rag.build_index(
+            settings,
+            config,
+            embedding_client=llmkit.create_embedding_client(
+                config, http_client=http_client
+            ),
+            store=rag.JsonlVectorStore(rag.chunks_path(settings)),
+            manifest=rag.load_manifest(settings),
+        )
 
     after = snapshot_tree(sample_vault_copy)
-    assert len(parsed) == 11
+    # 索引が実際に成果物を書いたうえで vault は 1 バイトも変わっていない
+    # (何もしなかったから一致した、ではないことを同時に主張する)。
+    assert result.indexed_notes == 11
+    assert result.embedded_chunks == 24
+    assert rag.chunks_path(settings).is_file()
+    assert rag.manifest_path(settings).is_file()
     assert before == after
     assert set(before) >= {
         "notes",

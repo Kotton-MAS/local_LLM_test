@@ -212,3 +212,50 @@ def test_the_sample_vault_config_points_at_the_synthetic_vault() -> None:
     assert settings.vault_dir == (REPO_ROOT / "vaults" / "sample").resolve(), (
         f"vaults/sample.toml が合成 vault 以外を指している: {settings.vault_dir}"
     )
+
+
+# --------------------------------------------------------------------------
+# 索引成果物 (D-40)
+# --------------------------------------------------------------------------
+
+# 索引成果物と、実 vault を指す設定ファイル。3b で初めてノート本文が全量
+# ディスクへ書き出されるようになったため、無視されるべき場所を名指しで固定する。
+UNTRACKED_INDEX_PATHS: tuple[str, ...] = (
+    "data/index/sample/chunks.jsonl",
+    "data/index/sample/manifest.json",
+    "data/index/local/chunks.jsonl",
+    "data/index/local/manifest.json",
+    "vaults/local.toml",
+)
+
+
+def test_the_index_directory_is_never_tracked() -> None:
+    """D-40 guard: 索引成果物と実 vault の設定が追跡側に出ないこと。
+
+    ``chunks.jsonl`` は ``ChunkRecord.body`` としてノート本文を**全量**持つ。
+    実 vault を索引すれば個人ノートがそのまま入るので、追跡されると PUBLIC
+    リポジトリへの不可逆な公開になる。しかも SubagentStop の自動コミットは
+    ``git add -A`` で走り、``data/`` を機密パターンとして扱わない。
+
+    ``.gitignore`` の記述を読むのではなく ``git check-ignore`` の判定を見る
+    (記述があっても再包含規則で打ち消され得るため)。併せて ``data/`` 配下に
+    追跡済みファイルが 1 件も無いことを確かめ、「まだ作っていないから通った」
+    ではないことを主張する。
+    """
+    offenders = [path for path in UNTRACKED_INDEX_PATHS if not _is_ignored(path)]
+    assert not offenders, (
+        f"{offenders} が .gitignore で無視されていない。索引成果物は "
+        "ノート本文を全量保持するため、追跡されると個人ノートが PUBLIC "
+        "リポジトリへ公開される (D-40)"
+    )
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z", "--", "data"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert not [name for name in tracked.split("\0") if name], (
+        f"data/ 配下に追跡済みファイルがある: {tracked!r}"
+    )
