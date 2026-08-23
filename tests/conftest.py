@@ -1,0 +1,248 @@
+"""テスト全体で共有する設定・fixture。
+
+このファイルが担保するのは 2 点:
+
+1. **live マーカーの既定スキップ** — 実ランタイムに接続するテストは
+   ``@pytest.mark.live`` を付け、``--run-live`` を渡したときだけ実行する (D-02)。
+2. **実ネットワークの遮断** — live 以外のテストではソケット接続を機械的に禁止する。
+   ``httpx.MockTransport`` はソケットを使わないため影響を受けない。
+
+加えて、各テストモジュールに散っていた「``LLMKIT_*`` 環境変数の除去」
+「成功応答ペイロード」「リクエスト捕捉つき MockTransport」をここに集約する。
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+from collections.abc import Callable, Iterator, Mapping
+from pathlib import Path
+from typing import Protocol
+
+import httpx
+import pytest
+
+pytest_plugins = ["pytester"]
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "default.toml"
+EXTERNAL_CONFIG = REPO_ROOT / "configs" / "external_openai.toml"
+
+LIVE_MARKER = "live"
+RUN_LIVE_OPTION = "--run-live"
+
+#: 正常な OpenAI 互換 chat completion 応答。全テストが共有する。
+SUCCESS_PAYLOAD: dict[str, object] = {
+    "id": "chatcmpl-test",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "qwen3:14b-q4_K_M",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "テスト応答"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+}
+
+#: 正常な Ollama ネイティブ /api/chat 応答 (stream=false)。SUCCESS_PAYLOAD と
+#: 同じ内容を、ネイティブ形状で表したもの。
+NATIVE_SUCCESS_PAYLOAD: dict[str, object] = {
+    "model": "qwen3:14b-q4_K_M",
+    "created_at": "2026-08-22T00:00:00.000000000Z",
+    "message": {"role": "assistant", "content": "テスト応答"},
+    "done": True,
+    "done_reason": "stop",
+    "total_duration": 1_600_000_000,
+    "prompt_eval_count": 11,
+    "prompt_eval_duration": 550_000_000,
+    "eval_count": 7,
+    "eval_duration": 1_000_000_000,
+}
+
+#: ネイティブ経路の判定に使うパス。runtime.kind = "ollama" の送信先。
+NATIVE_CHAT_PATH = "/api/chat"
+
+Handler = Callable[[httpx.Request], httpx.Response]
+
+
+# --------------------------------------------------------------------------
+# live マーカー (D-02)
+# --------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        RUN_LIVE_OPTION,
+        action="store_true",
+        default=False,
+        help="実ランタイムに接続する live マーカー付きテストも実行する",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # pyproject.toml にも登録しているが、rootdir が変わる入れ子実行でも
+    # マーカーが未知にならないようにここでも宣言する。
+    config.addinivalue_line(
+        "markers",
+        f"{LIVE_MARKER}: 実ランタイムに接続するテスト (既定スキップ)",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """``--run-live`` が無い限り live マーカー付きテストをスキップする。"""
+    if config.getoption(RUN_LIVE_OPTION):
+        return
+    skip_live = pytest.mark.skip(
+        reason=f"live テストは既定でスキップします ({RUN_LIVE_OPTION} で実行)"
+    )
+    for item in items:
+        if item.get_closest_marker(LIVE_MARKER) is not None:
+            item.add_marker(skip_live)
+
+
+# --------------------------------------------------------------------------
+# 実行環境の隔離
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_llmkit_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ローカルの LLMKIT_* 環境変数でテスト結果が変わらないようにする。"""
+    for name in list(os.environ):
+        if name.startswith("LLMKIT_"):
+            monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _forbid_real_network(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """live 以外のテストからの実ネットワーク接続を禁止する (D-02)。
+
+    ``httpx.MockTransport`` はソケットを開かないため、正しく書かれたテストは
+    この fixture の影響を受けない。実接続が混入した瞬間に落ちる。
+    """
+    if request.node.get_closest_marker(LIVE_MARKER) is not None:
+        return
+
+    def _blocked(*args: object, **kwargs: object) -> object:
+        message = (
+            "テストが実ネットワークへ接続しようとしました。"
+            "httpx.MockTransport を使うか @pytest.mark.live を付けてください (D-02)"
+        )
+        raise AssertionError(message)
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    monkeypatch.setattr(socket, "create_connection", _blocked)
+
+
+# --------------------------------------------------------------------------
+# 共有 fixture
+# --------------------------------------------------------------------------
+
+
+class RecordingTransport:
+    """発行されたリクエストをすべて記録する ``httpx.MockTransport`` のラッパ。
+
+    ``requests`` が空であること自体が「HTTP を 1 回も出していない」ことの証拠に
+    なるため、受け入れ条件3 の検証にもそのまま使える。
+    """
+
+    def __init__(
+        self,
+        handler: Handler | None = None,
+        *,
+        requests: list[httpx.Request] | None = None,
+    ) -> None:
+        self.requests: list[httpx.Request] = requests if requests is not None else []
+        self._handler = handler if handler is not None else _default_handler
+        self.transport = httpx.MockTransport(self._record)
+
+    def _record(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return self._handler(request)
+
+    def client(self) -> httpx.Client:
+        """このトランスポートを使う ``httpx.Client`` を作る。"""
+        return httpx.Client(transport=self.transport)
+
+    @property
+    def call_count(self) -> int:
+        return len(self.requests)
+
+
+def _default_handler(request: httpx.Request) -> httpx.Response:
+    """送信先パスに合わせた正常応答を返す。
+
+    ネイティブ ``/api/chat`` と OpenAI 互換 ``/chat/completions`` では応答形状が
+    違うため、URL で振り分ける (ここで分岐しないと、ネイティブ経路のテストが
+    OpenAI 形状の応答を受け取って UpstreamError になる)。
+    """
+    if request.url.path.endswith(NATIVE_CHAT_PATH):
+        return httpx.Response(200, json=NATIVE_SUCCESS_PAYLOAD)
+    return httpx.Response(200, json=SUCCESS_PAYLOAD)
+
+
+@pytest.fixture
+def mock_transport() -> RecordingTransport:
+    """成功応答を返し、リクエストを捕捉する MockTransport。"""
+    return RecordingTransport()
+
+
+@pytest.fixture
+def mock_http_client(mock_transport: RecordingTransport) -> Iterator[httpx.Client]:
+    """``mock_transport`` を使う httpx.Client (使用後に閉じる)。"""
+    with mock_transport.client() as client:
+        yield client
+
+
+class ConfigWriter(Protocol):
+    """``tmp_config`` fixture が返すファクトリの型。"""
+
+    def __call__(
+        self,
+        edits: Mapping[str, str] | None = None,
+        *,
+        name: str = "config.toml",
+    ) -> Path: ...
+
+
+def write_config_variant(
+    directory: Path,
+    edits: Mapping[str, str] | None = None,
+    *,
+    name: str = "config.toml",
+) -> Path:
+    """``configs/default.toml`` を一部置換して ``directory`` に書き出す。
+
+    ``edits`` は「置換前の文字列 -> 置換後の文字列」。置換対象が見つからなければ
+    その場で落とす (設定ファイルの書式が変わったのにテストだけ通る事故を防ぐ)。
+    ``bootstrap`` は Path しか受け取らないため、設定ファイル経由でしか振れない値を
+    テストから掃引するのに使う。
+    """
+    text = DEFAULT_CONFIG.read_text(encoding="utf-8")
+    for before, after in (edits or {}).items():
+        replaced = text.replace(before, after)
+        assert replaced != text, f"置換対象が見つかりません: {before}"
+        text = replaced
+    destination = directory / name
+    destination.write_text(text, encoding="utf-8")
+    return destination
+
+
+@pytest.fixture
+def tmp_config(tmp_path: Path) -> ConfigWriter:
+    """``write_config_variant`` を ``tmp_path`` に束ねたファクトリ。"""
+
+    def write(
+        edits: Mapping[str, str] | None = None, *, name: str = "config.toml"
+    ) -> Path:
+        return write_config_variant(tmp_path, edits, name=name)
+
+    return write

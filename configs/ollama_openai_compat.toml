@@ -1,0 +1,58 @@
+# ローカル Ollama を「OpenAI 互換 /v1/chat/completions」経由で叩く設定。
+# configs/default.toml との差は runtime.kind の 1 行だけで、同一の Ollama に対して
+# 2 経路 (ネイティブ /api/chat と OpenAI 互換) を A/B 比較するために置く。
+#
+# 注意: Phase 0 実測で、この経路は options.num_ctx を無視する
+# (docs/phase0-vram-measurements.md)。16384 を送っても ollama ps の CONTEXT は
+# 4096 のままになる。コンテキスト長を設定で切り替えたい通常の用途では
+# configs/default.toml (kind = "ollama") を使うこと (D-10)。
+#
+# api_key の「値」はここに書かない。環境変数名だけを api_key_env に書く。
+# base_url は実行マニフェスト・ログ・標準出力へ verbatim (そのまま) で
+# 記録される。認証情報を URL のどの位置 (userinfo/path/query/fragment) にも
+# 含めないこと (userinfo とクエリ・フラグメントは読み込み時に拒否されるが、
+# path 中の秘密は機械的には防げない)。
+
+[runtime]
+kind = "openai_compatible"
+base_url = "http://localhost:11434/v1"
+api_key_env = "LLMKIT_API_KEY"
+timeout_s = 120.0
+# ローカルの Ollama なので VRAM 予算ガードは有効にする (外部 API ではない)。
+is_local = true
+
+[generation]
+model = "qwen3-14b"
+context_tokens = 16384
+temperature = 0.7
+top_p = 0.9
+max_output_tokens = 1024
+seed = 0
+
+[vram]
+# 実測 (docs/phase0-vram-measurements.md): 増分 13.68 GiB は 100% GPU、
+# 14.46 GiB 相当 (num_ctx=98,304) で CPU オフロードが発生した。予算はその
+# 区間の内側に置く。カード容量 16 GiB は「増分」の上限ではない
+# (アイドルで 0.60 GiB を使用している)。
+budget_gib = 14.0
+runtime_overhead_gib = 0.8
+active_profile = "rag_default"
+
+# 要件書 構成1: 生成 + 埋め込み + リランカーを 16 GiB に同居させる
+[profiles.rag_default]
+generation = "qwen3-14b"
+embedding = "ruri-v3-310m"
+reranker = "bge-reranker-v2-m3"
+
+# 要件書 構成2: 長文要約。埋め込み・リランカーを退避する
+[profiles.long_context]
+generation = "gpt-oss-20b"
+
+[profiles.lightweight]
+generation = "qwen3-8b"
+
+# 要件書 構成3 (非推奨): 予算ガードが停止することの実証用に定義を残す
+[profiles.oversized]
+generation = "gpt-oss-20b"
+embedding = "ruri-v3-310m"
+reranker = "bge-reranker-v2-m3"

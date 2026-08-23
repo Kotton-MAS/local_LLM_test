@@ -1,0 +1,94 @@
+# 意図的な設計判断。散文ではなく構造データで持ち、guard_test を必須にする。
+#
+# 検証: python3 ~/.claude/scripts/check_decisions.py .claude/decisions.yaml
+#   - PostToolUse hook (check-decisions.sh) が編集直後に自動実行
+#   - Stop hook (verify-ci.sh) が停止前に guard_test を実走する
+#
+# 出典: docs/plans/2026-08-22-phase1-inference-client-l2.md §6
+
+- id: D-01
+  rule: "VRAM 使用量の見積りは llmkit/catalog.py の静的テーブルで行い、nvidia-smi や実測値の参照を行わない"
+  rationale: "Phase 0 (実測) が未実施であり、CI 環境には GPU が無い。かつ判定はモデルをロードする前に行う必要があるため、実測ベースでは原理的に成立しない。要件書 L60-L83 の表を唯一の出典とする"
+  guard_test: "tests/test_vram.py::test_estimate_is_pure_and_needs_no_gpu"
+
+- id: D-02
+  rule: "テストは実 HTTP を発行しない。実ランタイムに接続するテストは @pytest.mark.live を付け、--run-live 指定時のみ実行する"
+  rationale: "Ollama の導入は実装スコープ外でありユーザーの手動作業。CI (GitHub Actions) には Ollama が無いため、実接続テストは常に赤になる。httpx.MockTransport で全経路を決定論的に検証する"
+  guard_test: "tests/test_testing_policy.py::test_live_tests_are_skipped_by_default"
+
+- id: D-03
+  rule: "VRAM に関する数値の単位は GiB に統一する。GB と GiB を混在させず、要件書の 16GB は 16.0 GiB として扱う"
+  rationale: "実機 VRAM は 16376 MiB (= 15.99 GiB = 17.17 GB) であり、GB/GiB の取り違えは 7% の判定誤差になる。差分は vram.budget_gib の設定で吸収し、コード内では常に GiB を使う"
+  guard_test: "tests/test_vram.py::test_all_vram_values_are_gib"
+
+- id: D-04
+  rule: "VRAM 予算超過は WARNING ログを出したうえで VramBudgetExceededError を送出して停止する。警告のみで処理を継続せず、HTTP も発行しない"
+  rationale: "要件書 L296「16GB を超えるプロファイルを指定した場合、起動時に警告して停止する」。継続すると実行時 OOM になり、原因が特定しにくいエラーに化ける"
+  guard_test: "tests/test_bootstrap.py::test_oversized_profile_warns_and_aborts_without_http"
+
+- id: D-05
+  rule: "api_key は設定ファイルに直接書かず api_key_env (環境変数名) で参照し、SecretStr で保持する。ログ・実行マニフェスト・例外メッセージには環境変数名のみを出す"
+  rationale: "CLAUDE.md セキュリティ原則「認証情報のハードコード禁止」「ログへの認証情報出力禁止」。configs/*.toml はコミット対象のため、値を書ける形にすると事故が起きる"
+  guard_test: "tests/test_manifest.py::test_manifest_and_logs_never_contain_api_key"
+
+- id: D-06
+  rule: "llmkit パッケージはリポジトリ直下のフラットレイアウトに置き、src/ レイアウトにしない"
+  rationale: "既存 pyproject.toml に build-system が無く pythonpath=[.] で main.py を解決している。src/ に移すと pytest の pythonpath / mypy 対象 / CI の全てに変更が波及し、テンプレートの検証構成 (make ci) を壊す。パッケージ配布は Phase 1 の要件に無い"
+  guard_test: "tests/test_layout.py::test_llmkit_importable_from_repo_root"
+
+- id: D-07
+  rule: "推論ランタイムの JSON レスポンスは pydantic で厳格にパースし、必須フィールドの欠損は UpstreamError にする。dict[str, Any] のまま扱わない"
+  rationale: "mypy の disallow_any_explicit = true により Any を明示的に書けない。加えて、欠損を黙って None にすると Phase 2 の速度指標が静かに欠測し、比較結果が壊れる。パースを厳格にして早期に失敗させる"
+  guard_test: "tests/test_client.py::test_malformed_response_raises_upstream_error"
+
+- id: D-08
+  rule: "設定・レスポンスのスキーマは pydantic.dataclasses.dataclass + TypeAdapter で定義し、pydantic.BaseModel を継承しない"
+  rationale: "BaseModel を継承した定義行は mypy の disallow_any_explicit = true で explicit-any になり、pyproject の mypy 設定を緩めるか type: ignore を撒く以外に通す手段が無い。どちらもハード制約に反するため、ignore ゼロで済む pydantic dataclass を採る (仕様書 §7 リスク3 の判断基準に従った)"
+  guard_test: "tests/test_layout.py::test_schemas_use_pydantic_dataclasses_not_basemodel"
+
+- id: D-09
+  rule: "Phase 1 の『設定のみで切替』はカタログ登録済み model_id 間、および『ローカルと外部 API の切替』軸に限る。ランタイム固有の served_name (vLLM 等へ渡す実モデル名) を設定側から上書きする手段は Phase 1 には無く、Phase 2 で対応する"
+  rationale: "resolve_model_spec は is_local=false かつカタログ未登録の model_id を passthrough で許すが、is_local=true (ローカル実行) では VRAM 見積りの正確性 (D-01) が要件そのものであり、未登録モデルを黙って通すことはできない。ローカルでランタイムを差し替える (例: vLLM に実モデル名 'Qwen/Qwen3-14B-AWQ' を渡す) には現状 llmkit/catalog.py の編集が必要 (F-2-001 で実測確認)。設定側に [models.<id>] 上書き表を導入する恒久対応は別タスク (Phase 2) とし、今回のスコープでは行わない"
+  guard_test: "tests/test_catalog.py::test_resolve_model_spec_raises_config_error_for_unregistered_model_when_local"
+
+# 出典: docs/plans/2026-08-22-phase1-calibration-and-native-chat.md §6
+
+- id: D-10
+  rule: "runtime.kind がクライアント実装を選ぶ。kind='ollama' はネイティブ /api/chat、kind='openai_compatible' は /v1/chat/completions を使う。分岐は create_chat_client の 1 か所だけに置く"
+  rationale: "Phase 0 実測で /v1/chat/completions は options.num_ctx を無視することを確認した (16384 / 32768 を送っても ollama ps の CONTEXT は 4096)。コンテキスト長を設定で切り替えるという Phase 1 の前提が OpenAI 互換経路では成立しない。これにより元仕様書 §8 Q-B の決定 (1)『OpenAI 互換のみ』を変更する。層の共通境界はワイヤプロトコルではなく ChatClient Protocol とする。D-09 は変更しない"
+  guard_test: "tests/test_client_factory.py::test_runtime_kind_selects_the_client_implementation"
+
+- id: D-11
+  rule: "ネイティブ経路のエンドポイントは runtime.base_url の末尾 /v1 を 1 セグメントだけ除去して /api/chat を連結して導出する。ネイティブ URL 用の設定キーを追加しない"
+  rationale: "既存の base_url は OpenAI 互換の /v1 を指す前提で configs とテストに固定されており、キーを増やすと『設定のみで切替』の軸が増えて D-09 の整理と衝突する。導出が合わない構成 (ゲートウェイ等) は kind='openai_compatible' を選べば従来どおり動く"
+  guard_test: "tests/test_client_native.py::test_native_endpoint_url_is_derived_from_base_url"
+
+- id: D-12
+  rule: "GPU 常駐上限はモデル単位の定数ではなく vram.budget_gib (プロファイル単位の予算判定) で表現する。budget_gib はカード容量ではなく『実測でオフロードが始まらない増分の上限』であり、本機の既定は 14.0 GiB"
+  rationale: "実測で gpt-oss-20b 単体は合計 13.68 GiB (num_ctx=65536) まで 100% GPU、num_ctx=98304 (見積り 14.46 GiB) で CPU オフロードが発生した。上限は同居する埋め込み・リランカーの有無に依存するため model 単位の max_context_tokens では表せない。カード 16376 MiB = 15.99 GiB のうちアイドルで 0.60 GiB を使用しており、増分の予算 16.0 は原理的に大きすぎる。要件書 L296 の『16GB を超えたら停止』は、より早く停止する本設定でも満たされる"
+  guard_test: "tests/test_vram.py::test_budget_reflects_the_measured_gpu_resident_ceiling"
+
+- id: D-13
+  rule: "ChatResult は prompt/eval を分離した速度指標を ChatTimings (任意フィールド、既定 None) として持つ。ネイティブ応答が prompt_eval_count 等を返さない場合は 0 で埋めず None にする。OpenAI 互換経路では常に None"
+  rationale: "要件書 L303 (Phase 2 受け入れ) が『プロンプト処理速度』を要求し、F-1-006 が受け皿の不在を指摘している。これを返すのはネイティブ応答だけで、その実装を今行っている。0 で埋めると『プロンプトキャッシュヒットで未計測』と『実際に 0 トークン』が区別できず、Phase 2 の比較が静かに壊れる (D-07 と同じ趣旨)"
+  guard_test: "tests/test_client_native.py::test_native_result_exposes_prompt_and_eval_timings"
+
+- id: D-14
+  rule: "【撤回】旧 D-14 (ruri-v3-310m / ruri-reranker は取得不能。weights_gib は仮値のまま、方式決定は Phase 3) を撤回する。カタログの全モデルは実測に裏付けられ、source_note に『取得不能』『(仮)』を残さない。リランカーは要件書第一候補の Ruri Reranker ではなく BGE Reranker v2-m3 (model_id = bge-reranker-v2-m3) を採用する"
+  rationale: "2026-08-23 の実機検証で前提が覆った。埋め込みは有志の GGUF 変換版 hf.co/Targoyle/ruri-v3-310m-GGUF で ollama pull でき /v1/embeddings が 768 次元を返した (VRAM 実測 0.57 GiB)。ollama pull できなかったのは Hugging Face の元リポジトリ (sentence-transformers 形式) だけだった。リランカーは Ollama に rerank API が無い (v0.33.0-rc2 でも /api/rerank・/v1/rerank とも 404、GitHub issue は open のまま) が、llama.cpp の llama-server で /v1/rerank が動作した (VRAM 実測 0.28 GiB、50 ペア 140 ms)。Ruri Reranker は GGUF が存在しないため、要件書が代替として挙げる BGE Reranker v2-m3 を採った。旧 D-14 の『Phase 3 まで決定しない』は事実に反する状態になり、残すと fixer が仮値を復活させる根拠になる。id を維持するのは過去の仕様書・PR 本文が D-14 を参照しているため (削除すると参照先が消える)"
+  guard_test: "tests/test_catalog.py::test_no_catalog_entry_claims_to_be_unavailable"
+
+- id: D-15
+  rule: "『どのサーバプロセスがそのモデルを載せるか』は ModelSpec.serving_runtime (ServingRuntime = Literal['ollama','llama_cpp_server','external']) で表す。既存の config.RuntimeKind / client.ApiStyle を再利用せず、既定値も与えない。Phase 1 ではディスパッチに使わず、実行マニフェストに記録する。resolve_model_spec は、カタログ登録済み model_id であっても is_local=false (外部 API) の解決では serving_runtime を 'external' に差し替える (weights_gib / kv_gib_per_1k_tokens はカタログ値のまま維持し VRAM 見積りの挙動は変えない)。is_local=true ではカタログの ModelSpec をそのまま返す"
+  rationale: "RuntimeKind は接続単位のチャット送出経路、ApiStyle はワイヤプロトコルであり、どちらもモデル単位の『載せ先プロセス』を表さない。リランカーに openai_compatible を持たせると『このモデルは chat を話す』という偽の主張になる。また catalog.py が config.py を import すると最下層モジュールの独立性 (test_estimate_is_pure_and_needs_no_gpu が守る性質) が崩れる。source_note に散文で書く案は機械識別できず Phase 3 のディスパッチが文字列マッチに退行するため採らない。既定値を与えると将来のモデルが黙って Ollama 扱いになり、まさに今回検出した誤りを再生産する。飾りにしないためマニフェストへ配線し掃引テストで固定する。2026-08-23 round 6 レビュー (F-6-001) で、外部 API 実行 (is_local=false) でもカタログ登録済みモデルは serving_runtime='ollama' のまま返っており、実際の載せ先と無関係にモデルのカタログ登録有無で決まる偽の主張が対称的に発生することが判明したため、resolve_model_spec の挙動を追記した"
+  guard_test: "tests/test_catalog.py::test_models_declare_the_runtime_that_serves_them"
+
+- id: D-16
+  rule: "VRAM 見積りは別プロセス (llama-server) が確保する分も単純に合算する。llmkit/vram.py の式は変更しない。埋め込み・リランカーの weights_gib は『純粋な重み』ではなく、そのランタイムのオーバーヘッドを含む実測 VRAM 増分そのものを入れる。vram.runtime_overhead_gib (0.8) は生成ランタイム 1 つ分を表す"
+  rationale: "予算判定の対象は nvidia-smi が返すデバイス全体の使用量であり、プロセス境界と無関係。budget_gib は D-12 で『実測でオフロードが始まらない増分の上限』と定義済みで、これもプロセス非依存の量である。2026-08-23 の同居実測 (アイドル 0.56 を除く増分 11.97 GiB) に対し較正後見積りは 11.98 GiB で、成分ごとにも一致した (生成 11.13 vs 11.12 / 埋め込み 0.57 / リランカー 0.28)。モデル単位のオーバーヘッド欄を足すと見積り式と ModelSpec の両方が変わるが、実測は合計値しか取れておらず分離の根拠が無い"
+  guard_test: "tests/test_vram.py::test_estimate_reproduces_the_configuration1_coresidency_measurement"
+
+- id: D-17
+  rule: "llama-server の起動はリポジトリ内の scripts/start-reranker.sh で行い、systemd ユニットを作らない。バイナリ・モデル・ホスト・ポート・GPU レイヤ数・ctx-size はすべて環境変数で上書き可能にし、リポジトリ外の絶対パスをハードコードしない。--dry-run は解決結果を出力して exit 0 する (存在チェックをしない)"
+  rationale: "llama.cpp は ~/.local/opt、モデルは ~/.local/share/llama-models に置いた (システムを汚さないユーザースコープ)。この配置は開発者ごとに異なるため既定値としてのみ持ち上書き可能にする。systemd を触ると Ollama 側の管理方式と二重になり、不可逆な変更 (要承認) にもなる。--dry-run を存在チェック無しにするのは llama-server が無い CI で環境変数の配線をテストするため (無いと『上書きできるはず』が散文の主張のままになる)"
+  guard_test: "tests/test_reranker_script.py::test_launch_script_paths_are_overridable_by_environment"
