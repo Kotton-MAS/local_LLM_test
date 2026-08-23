@@ -1,0 +1,16 @@
+# 合成 vault の設定 (受け入れ検証用)。
+# 実 vault を索引するときは vaults/local.toml を作るか --vault で渡す
+# (実 vault のパス・本文はコミットしない)。
+
+[vault]
+id = "sample"
+dir = "sample"
+
+[index]
+dir = "../data/index/sample"
+
+[chunk]
+max_tokens = 240
+
+[embed]
+batch_size = 16

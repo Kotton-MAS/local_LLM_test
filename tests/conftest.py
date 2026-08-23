@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
@@ -270,3 +271,52 @@ def tmp_config(tmp_path: Path) -> ConfigWriter:
         return write_config_variant(tmp_path, edits, name=name)
 
     return write
+
+
+# --------------------------------------------------------------------------
+# 合成 vault (rag / Phase 3)
+# --------------------------------------------------------------------------
+
+#: コミット済みの合成 vault。読み取りだけを行うテストはこれを直接使う。
+SAMPLE_VAULT_DIR = REPO_ROOT / "vaults" / "sample"
+SAMPLE_VAULT_CONFIG = REPO_ROOT / "vaults" / "sample.toml"
+
+
+def write_rag_settings(
+    directory: Path,
+    *,
+    vault_dir: str = "vault",
+    index_dir: str = "index",
+    vault_id: str = "sample",
+    include_globs: Sequence[str] | None = None,
+    exclude_globs: Sequence[str] | None = None,
+    name: str = "rag.toml",
+) -> Path:
+    """索引設定 TOML を ``directory`` に書き出してそのパスを返す。
+
+    パスは設定ファイルからの相対として解決されるため、リポジトリの外 (tmp_path)
+    でも実 vault の絶対パスを 1 つも書かずに掃引できる (E30)。
+    """
+    lines = ["[vault]", f'id = "{vault_id}"', f'dir = "{vault_dir}"']
+    if include_globs is not None:
+        rendered = ", ".join(f'"{pattern}"' for pattern in include_globs)
+        lines.append(f"include_globs = [{rendered}]")
+    if exclude_globs is not None:
+        rendered = ", ".join(f'"{pattern}"' for pattern in exclude_globs)
+        lines.append(f"exclude_globs = [{rendered}]")
+    lines += ["", "[index]", f'dir = "{index_dir}"', ""]
+    destination = directory / name
+    destination.write_text("\n".join(lines), encoding="utf-8")
+    return destination
+
+
+@pytest.fixture
+def sample_vault_copy(tmp_path: Path) -> Path:
+    """``vaults/sample/`` を ``tmp_path/vault`` に複製してそのパスを返す。
+
+    複製に対して書き込み権限の変更・除外パターンの掃引・シンボリックリンクの
+    追加を行うため、コミット済みの合成 vault 自体は決して変更されない。
+    """
+    destination = tmp_path / "vault"
+    shutil.copytree(SAMPLE_VAULT_DIR, destination)
+    return destination
