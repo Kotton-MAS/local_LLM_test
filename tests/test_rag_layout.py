@@ -38,8 +38,10 @@ PACKAGE_DIR = REPO_ROOT / "llmkit"
 #: ``_SUBMODULE_NAMES`` には入れない (``harness`` と同じ扱い)。
 _SUBMODULE_NAMES = (
     "chunker",
+    "indexer",
     "parser",
     "settings",
+    "store",
     "vault",
 )
 
@@ -68,7 +70,23 @@ _FILESYSTEM_READ_NAMES = frozenset(
 
 #: 例外: ``rag/settings.py`` は**設定ファイル自身**を読む。読む対象は呼び出し元が
 #: 渡した TOML のパスだけで、vault 相対パスを受け取る関数を 1 つも持たない。
-_FILESYSTEM_READ_ALLOWANCES = {"settings.py": frozenset({"read_text"})}
+#: ``rag/store.py`` (``chunks.jsonl``) と ``rag/indexer.py`` (``manifest.json``)
+#: も同じ条件で**索引ディレクトリの中のファイルだけ**を読む (vault 相対パスを
+#: 受け取る関数を 1 つも持たず、vault の中身は ``rag/vault.py`` の関数を通して
+#: しか取れない)。索引を読み直す経路は 3b の差分更新に必須で、この 3 つ以外は
+#: 依然 1 つも許さない。許可はいずれも ``read_text`` だけで、``open`` /
+#: ``read_bytes`` / ``glob`` / ``iterdir`` 等は 1 つも許していない。
+#: 下の ``test_only_the_vault_and_settings_modules_know_where_the_vault_is`` が
+#: 「許可されたモジュールは vault の場所を知らない」ことを別途固定する。
+#: 設定オブジェクトが持つ「vault の場所」の属性名。これを参照できなければ
+#: vault 配下のパスは組み立てられない。
+_VAULT_LOCATION_ATTR = "vault_dir"
+
+_FILESYSTEM_READ_ALLOWANCES = {
+    "settings.py": frozenset({"read_text"}),
+    "store.py": frozenset({"read_text"}),
+    "indexer.py": frozenset({"read_text"}),
+}
 
 
 def module_paths() -> list[Path]:
@@ -172,14 +190,21 @@ def test_rag_all_matches_the_union_of_submodule_all() -> None:
 
 
 def test_every_rag_submodule_is_covered_by_the_union_check() -> None:
-    """サブモジュールを足したのに ``_SUBMODULE_NAMES`` へ入れ忘れると落ちる。"""
+    """サブモジュールを足したのに ``_SUBMODULE_NAMES`` へ入れ忘れると落ちる。
+
+    ``cli`` だけは和集合検査の対象外 (L4 の入口であって公開 API ではない) だが、
+    **右辺に明示して完全一致を要求する**。``_SUBMODULE_NAMES`` を含まない側に
+    逃がす (``discovered >= set(_SUBMODULE_NAMES)`` 等) と、新しいサブモジュール
+    を足したまま再エクスポートを忘れても落ちなくなる。
+    ``tests/test_harness_layout.py`` の同名テストと同じ形 (§9 T7 決定1)。
+    """
     discovered = {
         module_path.stem
         for module_path in RAG_DIR.glob("*.py")
         if module_path.stem != "__init__"
     }
 
-    assert discovered == set(_SUBMODULE_NAMES)
+    assert discovered == {*_SUBMODULE_NAMES, "cli"}
 
 
 # --------------------------------------------------------------------------
@@ -322,3 +347,47 @@ def test_rag_schemas_use_pydantic_dataclasses_not_basemodel() -> None:
                     offenders.append(f"rag/{module_path.name}::{node.name}")
 
     assert not offenders, f"BaseModel を継承しているクラス: {offenders}"
+
+
+def test_only_the_vault_and_settings_modules_know_where_the_vault_is() -> None:
+    """D-30 (構造) の補強: vault の場所を知るモジュールを 2 つに閉じる。
+
+    ``test_only_the_vault_module_reads_the_vault`` は「あらゆるファイル読み取り」
+    を検査しており、D-30 の rule が言う「vault への I/O」より広い。そのため
+    索引ファイルを読むだけの ``store.py`` / ``indexer.py`` も引っかかり、
+    ``_FILESYSTEM_READ_ALLOWANCES`` に許可を足すことになった。許可リストは
+    ``rag/`` にファイルを読むモジュールが増えるたびに伸び、そのぶん検査が薄まる。
+
+    そこで許可をコメントの主張で終わらせず、**許可されたモジュールが vault を
+    読めないこと**を別の不変条件で裏打ちする。設定オブジェクトの vault の場所を
+    指す属性を参照しなければ vault 配下のパスを組み立てられないので、何を
+    ``read_text`` しようと vault には届かない。
+
+    ``vault.py`` は vault を読む唯一のモジュール、``settings.py`` はその属性を
+    解決・検証する唯一のモジュールなので対象外。それ以外が vault の場所を知る
+    必要が出たら、それは ``rag/vault.py`` の関数を呼ぶべき場面である。
+
+    検査は **AST の属性参照**で行う。行のテキスト走査にすると docstring で
+    属性名に言及しただけで落ち、実装者が説明を削る動機になる (T5 で実際に
+    2 か所そうなった)。説明を書く自由と検査の強さは両立できる。
+    """
+    knows_where_the_vault_is = {"vault.py", "settings.py"}
+    offenders: list[str] = []
+    for module_path in module_paths():
+        if module_path.name in knows_where_the_vault_is:
+            continue
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                referenced = node.attr == _VAULT_LOCATION_ATTR
+            elif isinstance(node, ast.Name):
+                referenced = node.id == _VAULT_LOCATION_ATTR
+            else:
+                continue
+            if referenced:
+                offenders.append(f"{module_path.name}:{node.lineno}")
+    assert not offenders, (
+        f"vault.py / settings.py 以外が {_VAULT_LOCATION_ATTR} を参照している。"
+        "vault を読む必要があるなら rag/vault.py の関数を通すこと: "
+        + ", ".join(offenders)
+    )

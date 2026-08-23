@@ -52,6 +52,7 @@ from llmkit.embeddings import (
     OpenAIEmbeddingClient,
     create_embedding_client,
     embeddings_url_for,
+    resolve_embedding_spec,
 )
 from llmkit.errors import (
     ConfigError,
@@ -144,6 +145,7 @@ __all__ = [
     "known_model_ids",
     "load_config",
     "manifest_filename",
+    "resolve_embedding_spec",
     "resolve_model_spec",
     "resolve_profile",
     "write_manifest",

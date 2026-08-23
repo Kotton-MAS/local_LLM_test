@@ -45,6 +45,7 @@ __all__ = [
     "OpenAIEmbeddingClient",
     "create_embedding_client",
     "embeddings_url_for",
+    "resolve_embedding_spec",
 ]
 
 _EMBEDDINGS_PATH = "/embeddings"
@@ -128,7 +129,7 @@ _PARSE_REMEDIATION = (
 )
 
 
-def _resolve_embedding_spec(config: AppConfig) -> ModelSpec:
+def resolve_embedding_spec(config: AppConfig) -> ModelSpec:
     """アクティブプロファイルの ``embedding`` を :class:`ModelSpec` へ解決する。
 
     出典はここ 1 か所だけ (D-27)。``generation.model`` は参照しない。
@@ -225,7 +226,7 @@ class OpenAIEmbeddingClient(_HttpEndpointClient):
                 カタログ未登録の場合。
         """
         super().__init__(
-            config, _resolve_embedding_spec(config), http_client=http_client
+            config, resolve_embedding_spec(config), http_client=http_client
         )
 
     @property
@@ -423,6 +424,6 @@ def create_embedding_client(
 
     Raises:
         ConfigError: 埋め込みモデルの解決に失敗した場合
-            (:func:`_resolve_embedding_spec` 参照)。
+            (:func:`resolve_embedding_spec` 参照)。
     """
     return OpenAIEmbeddingClient(config, http_client=http_client)

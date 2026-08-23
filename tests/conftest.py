@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import socket
@@ -320,3 +322,106 @@ def sample_vault_copy(tmp_path: Path) -> Path:
     destination = tmp_path / "vault"
     shutil.copytree(SAMPLE_VAULT_DIR, destination)
     return destination
+
+
+# --------------------------------------------------------------------------
+# 決定論的なフェイク埋め込み (rag / Phase 3b)
+# --------------------------------------------------------------------------
+
+#: フェイクのランタイムが名乗るモデル名 (応答の ``model``)。設定に書いた
+#: モデル ID とは別物で、索引はこちらをマニフェストに記録する (D-35)。
+FAKE_EMBEDDING_MODEL = "fake-embedding"
+
+#: 既定の次元。検査したいのは「同じテキストなら同じベクトル」であって次元
+#: そのものではないので軽量な低次元にする (768 次元は専用のテストが通す)。
+FAKE_EMBEDDING_DIMENSIONS = 8
+
+#: 埋め込み応答を差し替えるフック。入力テキストを受け取り、``None`` を返すと
+#: 通常の応答、``httpx.Response`` を返すとその応答になる。例外を送出すれば
+#: 接続断 (``httpx.ConnectError``) も再現できる。
+EmbeddingIntercept = Callable[[tuple[str, ...]], httpx.Response | None]
+
+
+def fake_embedding_vector(
+    text: str, *, dimensions: int = FAKE_EMBEDDING_DIMENSIONS
+) -> tuple[float, ...]:
+    """入力テキストの sha256 から決定論的にベクトルを導出する。
+
+    「同じテキストなら必ず同じベクトル」でないと、索引成果物のバイト一致
+    (D-37) も「編集していないノートのベクトルが変わっていない」(E29) も
+    検査できない。乱数やカウンタで作ると、再実行のたびに索引が変わるので
+    差分更新が正しくてもテストが落ちる (逆に壊れていても気づけない)。
+
+    ハッシュを ``dimensions`` 分だけ伸ばすためにカウンタを連結して繰り返す
+    (768 次元でも同じ規則で作れる)。値は ``[-1, 1)`` に収める。
+    """
+    seed = hashlib.sha256(text.encode("utf-8")).digest()
+    stream = bytearray()
+    counter = 0
+    while len(stream) < dimensions:
+        stream += hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
+        counter += 1
+    return tuple((stream[index] - 128) / 128.0 for index in range(dimensions))
+
+
+def fake_embedding_payload(
+    texts: Sequence[str],
+    *,
+    dimensions: int = FAKE_EMBEDDING_DIMENSIONS,
+    model: str = FAKE_EMBEDDING_MODEL,
+) -> dict[str, object]:
+    """OpenAI 互換 ``/embeddings`` の正常応答 (入力と同じ順序)。"""
+    return {
+        "object": "list",
+        "model": model,
+        "data": [
+            {
+                "object": "embedding",
+                "index": index,
+                "embedding": list(fake_embedding_vector(text, dimensions=dimensions)),
+            }
+            for index, text in enumerate(texts)
+        ],
+    }
+
+
+def fake_embedding_handler(
+    *,
+    dimensions: int = FAKE_EMBEDDING_DIMENSIONS,
+    model: str = FAKE_EMBEDDING_MODEL,
+    intercept: EmbeddingIntercept | None = None,
+) -> Handler:
+    """``/embeddings`` に決定論的な応答を返すハンドラ。
+
+    実 HTTP は 1 バイトも出さないが、``llmkit`` の
+    :class:`~llmkit.OpenAIEmbeddingClient` を素通りするので、例外の翻訳表
+    (次元不整合・件数不整合・エラーステータス) も本番と同じ経路を通る。
+    """
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        texts = tuple(str(text) for text in body["input"])
+        if intercept is not None:
+            replacement = intercept(texts)
+            if replacement is not None:
+                return replacement
+        return httpx.Response(
+            200, json=fake_embedding_payload(texts, dimensions=dimensions, model=model)
+        )
+
+    return handle
+
+
+def fake_embedding_transport(
+    *,
+    dimensions: int = FAKE_EMBEDDING_DIMENSIONS,
+    model: str = FAKE_EMBEDDING_MODEL,
+    intercept: EmbeddingIntercept | None = None,
+) -> RecordingTransport:
+    """:func:`fake_embedding_handler` を積んだ :class:`RecordingTransport`。
+
+    ``call_count`` が索引の要求回数そのものになる (E28 の掃引に使う)。
+    """
+    return RecordingTransport(
+        fake_embedding_handler(dimensions=dimensions, model=model, intercept=intercept)
+    )

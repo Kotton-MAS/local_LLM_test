@@ -47,6 +47,7 @@ __all__ = [
     "Chunk",
     "chunk_note",
     "estimate_tokens",
+    "render_embed_text",
 ]
 
 #: 見出し経路と本文の区切り。``embed_text`` の中でだけ使う。
@@ -327,8 +328,31 @@ def _pack_characters(
     return parts
 
 
+def render_embed_text(heading_path: Sequence[str], body: str, separator: str) -> str:
+    """埋め込みへ渡す文字列を組み立てる (規則4)。**唯一の実装**。
+
+    ``separator.join(heading_path) + "\n\n" + body``。:func:`chunk_note` の
+    ``Chunk.embed_text`` も、索引レコード (:class:`rag.ChunkRecord`) からの
+    再構成も、必ずこの関数を通る。永続化では ``embed_text`` を保存せず
+    ``heading_path`` + ``body`` から作り直すため (D-41)、組み立てが 2 か所に
+    分かれると「保存時と再構成時で別の文字列」という、例外もテスト失敗も
+    出ない乖離がそのまま検索精度の劣化になる (D-32 の ``_tokens_from_counts``
+    と同じ理由で 1 か所に閉じる)。
+
+    Args:
+        heading_path: ``(ノートタイトル, H1, H2, …)``。
+        body: 本文 (見出し経路の接頭辞を含まない)。
+        separator: 見出し経路の連結子 (``ChunkSettings.heading_separator``)。
+
+    Returns:
+        埋め込み対象の文字列。
+    """
+    return separator.join(heading_path) + _PREFIX_SEPARATOR + body
+
+
 def _embed_text(heading_path: Sequence[str], body: str, settings: ChunkSettings) -> str:
-    return settings.heading_separator.join(heading_path) + _PREFIX_SEPARATOR + body
+    """``settings`` から区切り文字を取り出して :func:`render_embed_text` に渡す。"""
+    return render_embed_text(heading_path, body, settings.heading_separator)
 
 
 def _estimate(text: str, settings: ChunkSettings) -> int:
