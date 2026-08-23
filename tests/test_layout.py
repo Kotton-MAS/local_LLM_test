@@ -31,6 +31,7 @@ _SUBMODULE_NAMES = (
     "catalog",
     "client",
     "config",
+    "embeddings",
     "errors",
     "manifest",
     "vram",
@@ -119,6 +120,23 @@ def test_public_api_matches_the_union_of_submodule_all() -> None:
     assert len(llmkit.__all__) == len(set(llmkit.__all__)), "重複エクスポートがあります"
     for name in llmkit.__all__:
         assert hasattr(llmkit, name), name
+
+
+def test_every_llmkit_submodule_is_covered_by_the_union_check() -> None:
+    """サブモジュールを足したのに ``_SUBMODULE_NAMES`` へ入れ忘れると落ちる。
+
+    ``harness`` 側の同名検査と同型 (F-8-00x と同じ再発防止)。和集合検査は
+    ``_SUBMODULE_NAMES`` に載っているモジュールしか見ないため、これが無いと
+    「新しいサブモジュールの ``__all__`` が ``llmkit.__all__`` に無い」状態が
+    無警告で通る。``cli`` は L4 (CLI) であり公開 API ではないため除く。
+    """
+    discovered = {
+        module_path.stem
+        for module_path in PACKAGE_DIR.glob("*.py")
+        if module_path.stem != "__init__"
+    }
+
+    assert discovered == {*_SUBMODULE_NAMES, "cli"}
 
 
 # --------------------------------------------------------------------------

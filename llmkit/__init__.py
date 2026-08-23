@@ -46,6 +46,13 @@ from llmkit.config import (
     VramConfig,
     load_config,
 )
+from llmkit.embeddings import (
+    EmbeddingBatch,
+    EmbeddingClient,
+    OpenAIEmbeddingClient,
+    create_embedding_client,
+    embeddings_url_for,
+)
 from llmkit.errors import (
     ConfigError,
     ContextLengthError,
@@ -93,6 +100,8 @@ __all__ = [
     "ChatTimings",
     "ConfigError",
     "ContextLengthError",
+    "EmbeddingBatch",
+    "EmbeddingClient",
     "GenerationParams",
     "LlmkitError",
     "ManifestGeneration",
@@ -105,6 +114,7 @@ __all__ = [
     "ModelSpec",
     "OllamaNativeClient",
     "OpenAICompatibleClient",
+    "OpenAIEmbeddingClient",
     "OutOfMemoryError",
     "ProfileConfig",
     "ResolvedProfile",
@@ -125,6 +135,8 @@ __all__ = [
     "check_budget",
     "compute_config_sha256",
     "create_chat_client",
+    "create_embedding_client",
+    "embeddings_url_for",
     "endpoint_url_for",
     "estimate_profile",
     "estimate_resolved_profile",

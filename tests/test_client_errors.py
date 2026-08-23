@@ -199,6 +199,44 @@ def test_context_length_400_for_passthrough_model_does_not_claim_a_fake_limit(
     assert "上限は不明" in message
 
 
+def test_context_length_remediation_is_abstract_on_the_shared_base() -> None:
+    """round-10 レビュー: 対処メッセージの上書き忘れを ABC/mypy で検出できること。
+
+    ``_context_length_message`` は F-9-001 の教訓でフックになっているが、
+    対処 (remediation) を返す ``_context_length_remediation`` は基底に
+    チャット向けの既定文面が残ったままで abstract ではなかった。埋め込みは
+    上書きしているため今は症状が出ないが、次にこの基底へ載る経路 (リランカー)
+    が上書きを忘れると同じ型の欠陥が対処メッセージ側で再発する。
+    ``__abstractmethods__`` に含まれ、上書きを忘れたサブクラスがインスタンス化
+    できないことを固定する。
+    """
+    from llmkit.catalog import resolve_model_spec
+    from llmkit.client import _HttpEndpointClient
+
+    assert "_context_length_remediation" in _HttpEndpointClient.__abstractmethods__
+
+    class _ForgetsToOverrideRemediation(_HttpEndpointClient):
+        @property
+        def endpoint_url(self) -> str:
+            return "http://example.invalid/v1/rerank"
+
+        def _request_context(self) -> str:
+            return "pairs=1"
+
+        def _model_setting_reference(self) -> str:
+            return "profiles.default.reranker"
+
+        def _context_length_subject(self) -> str:
+            return "リランク対象"
+
+        # _context_length_remediation を意図的に上書きしない。
+
+    config = load_config(DEFAULT_CONFIG)
+    spec = resolve_model_spec(config.generation.model, is_local=config.runtime.is_local)
+    with pytest.raises(TypeError, match="_context_length_remediation"):
+        _ForgetsToOverrideRemediation(config, spec)  # type: ignore[abstract]
+
+
 def test_other_status_maps_to_upstream_error_without_body() -> None:
     secret_detail = "INTERNAL-STACKTRACE-DO-NOT-LEAK"
 

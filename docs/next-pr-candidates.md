@@ -65,3 +65,44 @@
 > **本 PR で併せて解消した既存 finding** (上の一覧は未更新のまま残す。再スキャン時に重複しないための注記):
 > `F-1-006` (ChatResult に prompt/eval 分離の受け皿が無い) は `ChatTimings` の追加で解消 (**D-13**)。
 > `F-2-003` (`runtime.kind` が挙動に分岐していない) は `create_chat_client` の追加で解消 (**D-10**)。
+
+## round-9 (Phase 3a) の MEDIUM / INFO (2026-08-23 追記)
+
+出典: `.claude/tmp/findings/round-9/triage.json`。HIGH 6 件 (F-9-001 / F-9-002 / F-9-008 / F-9-013 / F-9-014 / F-9-028) は本 PR で対応済み。F-9-016 (`.gitignore`) はメインセッションが対応済み。以下 24 件 (MEDIUM 15 / INFO 9) は未対応。
+
+**次サイクル (3b) で必ず対応すべき2件**:
+
+| severity | id | 観点 | 箇所 | 内容 |
+|---|---|---|---|---|
+| MEDIUM | F-9-004 | reviewer-architecture | `rag/settings.py:293` | `load_settings` は `vault_dir` / `index_dir` を `expanduser().resolve()` で正規化するが `source_path` だけは呼び出し側が渡した `Path` をそのまま保持する。相対パスと絶対パスで同じ設定ファイルを渡すと `RagSettings` の等価性が偽になる。§9 T2 決定18 で `source_path` は 3b の `index_fingerprint` に入れると明記済みのため、このまま載せると**起動ディレクトリによって fingerprint が変わり全再構築になる** (D-28)。**3b 着手前に必ず `source_path=path.expanduser().resolve()` へ揃えること**。ただし fingerprint に入れる際は絶対パスそのもの (実 vault のパスは利用者名を含む) ではなく設定内容のハッシュにすることも併せて検討する |
+| MEDIUM | F-9-018 | reviewer-security | `rag/settings.py:233` | `_validate_index_dir` は `index.dir` が `vault_dir` 配下に解決されることだけを禁止しており、**リポジトリ内の追跡対象ディレクトリを指すことは禁止していない**。索引成果物 (`Chunk.body` / `embed_text`) はノート本文を全量保持するため、実 vault を索引しつつ `index.dir` を `data/` 以外のリポジトリ内パスに向けると個人ノート本文が **PUBLIC リポジトリへ入り得る**。3a には索引の書き出しコードがまだ無いため実害は未発生だが、**3b で索引を書き出す前に、`index_dir` が `.gitignore` で無視される場所であることを要求する検査を追加すること** (D-30 に条件を1つ足し guard_test を追加する) |
+
+(上記2件について、当初の依頼文中の ID 表記「F-9-011」は triage.json 上の実際の内容とは一致しなかった。F-9-011 は実際には `harness/runner.py` のコメント陳腐化を指す別件であり、下表に別掲した。内容が一致する正しい ID は F-9-004 であるため、そちらで記載した)
+
+**その他 (優先度は通常の MEDIUM/INFO)**:
+
+| severity | id | 観点 | 箇所 | 内容 |
+|---|---|---|---|---|
+| MEDIUM | F-9-003 | reviewer-architecture | `rag/parser.py:109` | `ParsedNote` は frozen dataclass だが `frontmatter` フィールドの型注釈は `Mapping` でも実体は可変な生 `dict` のままで、呼び出し側から書き換えられ frozen の保証が境界で破れる (`hash()` も `TypeError`) |
+| MEDIUM | F-9-005 | reviewer-architecture | `llmkit/embeddings.py:284` | 「HTTP 200 + 本文 error を翻訳表へ流すか」がサブクラスごとの上書きで決まっており、`OpenAIEmbeddingClient` は既存の `OpenAICompatibleClient` と逆の選択をしている (同条件で chat は `UpstreamError`、埋め込みは `ModelNotFoundError`) |
+| MEDIUM | F-9-009 | reviewer-docs | `.claude/decisions.yaml:143` | D-27 の rule 3条項のうち guard_test が検証するのは1条項目のみ (本 PR の F-9-008 対応で rule 側に他条項の担当テストを追記済みだが、根本の「guard_test は単一 node id」というスキーマ制約自体は残る) |
+| MEDIUM | F-9-010 | reviewer-docs | `.claude/decisions.yaml:158` | D-32 の rule の「上限は embed_text に適用する」条項を guard_test が検証していない (同上、本 PR で rule 側に追記済み) |
+| MEDIUM | F-9-011 | reviewer-docs | `harness/runner.py:629` | `_execute` 内のコメントが httpx.Client の所有権規則を「`llmkit._HttpChatClient` と同じ規則」と説明しているが、Phase 3a T1 でこの規則は chat 非依存の基底 `_HttpEndpointClient` に移った (埋め込みも継承する)。コメントを基底の名前に更新する |
+| MEDIUM | F-9-017 | reviewer-security | `rag/vault.py:88` | `_compile_glob` が中間の `**` を `(?:[^/]+/)*` に展開するため、パターンに `**` が複数現れると破滅的バックトラッキングが起きる (実測: `**` の個数 n=11 で 3.59 秒)。既定値は `**` 1個のみなので現状は無害 |
+| MEDIUM | F-9-019 | reviewer-security | `rag/vault.py:206` | `_resolve_note_path` は絶対パス・vault 外脱出・シンボリックリンクは弾くが通常ファイルであること (`S_ISREG`) を確認していない。`_accept_file` にはある判定が `read_note_bytes` / `read_note_text` の経路に無い |
+| MEDIUM | F-9-023 | reviewer-style | `tests/test_rag_layout.py:78` | `imported_module_names` が `tests/test_harness_layout.py:43-52` と完全に同一定義のまま複製されている (Phase 2 の `FakeProbe` 重複と同型の再発) |
+| MEDIUM | F-9-024 | reviewer-style | `tests/test_rag_layout.py:305` | D-08 の BaseModel 非継承検査が `tests/test_layout.py` と `tests/test_rag_layout.py` に事実上同一ロジックで並存 (§9 T2 決定15 で「3b で統合するか決めること」と未解決のまま申し送り済み) |
+| MEDIUM | F-9-025 | reviewer-style | `tests/test_rag_chunker.py:168` | `rag/` 側の新規 parametrize 4箇所が `ids=` を付けていない (同じ diff 内の `test_embeddings.py` は5箇所すべて付けており規約適用が割れている) |
+| MEDIUM | F-9-026 | reviewer-style | `rag/settings.py:97` | `EmbedSettings.batch_size` の既定値16に出所の記載が無い (`ChunkSettings` は数値の出典を Attributes docstring で追跡可能にしている) |
+| MEDIUM | F-9-029 | reviewer-test | `rag/vault.py:60` | `_compile_glob` の `?` ワイルドカード変換、および `**` が最初かつ末尾の特殊系が未到達。中間 `**` の2階層以上ネスト動作を直接検証するテストも無い |
+| MEDIUM | F-9-030 | reviewer-test | `tests/test_rag_vault.py:205` | D-30 動的 guard の健全性確認テストが本文変更とエントリ増加しか見ておらず、`st_mode` だけの変更を検出できることを検証していない |
+| INFO | F-9-006 | reviewer-architecture | `rag/parser.py:56` | `_LINK_HEADING_SEPARATOR = " > "` と `ChunkSettings.heading_separator` の既定値が独立した2か所に置かれている。設定を変えても wikilink 展開の区切りは追随しない |
+| INFO | F-9-007 | reviewer-architecture | `rag/chunker.py:130` | `Chunk` が `body` と `embed_text` を両方保持しており、3b の JSONL 永続化で本文が2重に書かれ得る。他2件 (D-08 走査の2ファイル並存、`vaults/sample.toml` 関連) も同 finding に同梱 |
+| INFO | F-9-012 | reviewer-docs | `docs/plans/2026-08-23-phase3-indexing.md:386` | §9 T1 の申し送りで挙げた D-25 の guard_test 候補と、実際に `.claude/decisions.yaml` に採用された guard_test が異なる |
+| INFO | F-9-015 | reviewer-performance | `docs/plans/2026-08-23-phase3-indexing.md:93` | D-26 の JSONL 永続化サイズ見積り (約3.5MB) が実測 (約6.36MB) の半分程度に過小評価されている |
+| INFO | F-9-020 | reviewer-security | `rag/vault.py:232` | `read_note_bytes` / `read_note_text` は vault 内であることは検査するが `exclude_globs` を適用しない (`.obsidian/app.json` 等を relpath 指定で読み出せる) |
+| INFO | F-9-021 | reviewer-security | `rag/settings.py:192` | 設定ファイル自身のパスが例外メッセージに絶対パスのまま出ることがある (`vault.dir` は `configured` 文字列のみを載せる方針が徹底されているのと非対称) |
+| INFO | F-9-022 | reviewer-security | `rag/vault.py:222` | `_resolve_note_path` の検査後に `read_note_bytes` が別途開き直すため TOCTOU の窓がある (ローカル単一利用者ツールのため実害は小さい) |
+| INFO | F-9-027 | reviewer-style | `rag/settings.py:48` | `NonEmptyStr` / `PositiveInt` / `PositiveFloat` の型エイリアスが `llmkit/config.py` / `harness/suite.py` に続き3重複製 |
+| INFO | F-9-031 | reviewer-test | `rag/parser.py:173` | frontmatter パース中の「空行または `#` コメント行をスキップ」分岐が未到達 (テストデータに該当ケース無し) |
+| INFO | F-9-032 | reviewer-uv | `docs/plans/2026-08-23-phase3-indexing.md` | 3b で Chroma 導入 (D-26) を検討する際の依存数見積りが read-only 権限のため transitive 総数まで測定できていない |
