@@ -11,12 +11,12 @@
 |---|---|---|
 | **0** | **環境構築と実測 (Ollama 導入・モデル取得・VRAM 実測)** | **完了 (2026-08-23 実測)** |
 | **1** | **推論クライアント層 (L2)** — `llmkit/` | **実装済み** |
-| 2 | モデル比較ハーネス | 未着手 |
+| **2** | **モデル比較ハーネス (L3)** — `harness/` + `suites/` + `results/` | **完了 (2026-08-23 実機実行)** |
 | 3 | RAG パイプライン (Obsidian vault) | 未着手 |
 | 4 | チャット UI 接続 (Open WebUI) | 未着手 |
 
 Phase 1 の残課題は [`docs/next-pr-candidates.md`](docs/next-pr-candidates.md) に、
-意図的な設計判断は `.claude/decisions.yaml` (D-01〜D-17) にあります。
+意図的な設計判断は `.claude/decisions.yaml` (D-01〜D-24) にあります。
 
 > **Phase 0 は完了しています** (受け入れ条件 5 項目すべて充足。実測は
 > [`docs/phase0-vram-measurements.md`](docs/phase0-vram-measurements.md))。
@@ -178,13 +178,99 @@ scripts/start-reranker.sh
 
 起動のたびに、使用した設定・プロファイル・VRAM 内訳・設定ファイルの SHA-256 を
 `outputs/runs/{開始時刻}-{run_id}.json` に記録します (`outputs/` は gitignore 済み)。
-同じ設定なら `config_sha256` が一致するため、Phase 2 の比較実験の再現条件になります。
+同じ設定ファイルなら `config_sha256` が一致します。ただし比較ハーネス (Phase 2) は
+モデルごとに設定を組み替えて起動するため、**実効値の同一性を表すのは `config_sha256` ではなく
+`run_fingerprint`** です (決定 D-20。後述の「モデル比較ハーネス」節)。
 
 ### テスト
 
 テストは Ollama 未起動・ネットワーク不通でも全件パスします (`httpx.MockTransport` で完結)。
 実ランタイムに接続するテストを書く場合は `@pytest.mark.live` を付けてください。既定でスキップされ、
 `uv run pytest --run-live` を指定したときだけ実行されます (決定 D-02)。
+
+## モデル比較ハーネス (Phase 2: 比較・計測層)
+
+プロンプト集と対象モデルのリストを 1 つの TOML で与えると、モデル × プロンプトの応答と
+速度・VRAM・再現条件を `results/` 配下に書き出す CLI です。仕様は
+`docs/plans/2026-08-23-phase2-comparison-harness.md`。
+
+```bash
+# 実行計画だけを見る (HTTP を 1 回も発行しない。Ollama が無くても終了コード 0)
+uv run python -m harness.cli run --suite suites/ja_basic.toml --config configs/default.toml --dry-run
+
+# 本実行 (results/<suite_id>/<実行時刻>-<run_fingerprint 先頭12桁>/ に書き出す)
+uv run python -m harness.cli run --suite suites/ja_basic.toml --config configs/default.toml
+
+# 一部だけ回す (--models は model_id のカンマ区切り、--limit はプロンプトを先頭 N 問に絞る)
+uv run python -m harness.cli run --models qwen3-8b --limit 2
+```
+
+`--dry-run` は VRAM 見積りと予算判定・予定リクエスト数・`run_fingerprint` を出して終わります。
+**比較を実際に回す前に、予算超過で途中から測れなくなる構成を検出できます。**
+
+### スイートの書き方 (`suites/*.toml`)
+
+```toml
+[suite]
+id = "ja_basic"              # results/<id>/ のディレクトリ名になる (パス区切りは不可)
+description = "日本語の基本タスクで比較する"
+warmup_runs = 1              # 既定 1。結果は捨てず phase="warmup" として残す (決定 D-22)
+
+[[models]]                   # 比較対象モデルのリスト (最低 1 件)
+model_id = "qwen3-14b"       # 省略した項目はベース設定 (--config) の値を使う
+profile = "rag_default"
+max_output_tokens = 512
+
+[[prompts]]                  # 評価用プロンプト集 (最低 1 件、id はスイート内で一意)
+id = "summarize"
+text = "次の文章を3行で要約してください。"
+system = "あなたは日本語の技術文書を扱うアシスタントです。"  # 任意
+tags = ["要約"]                                              # 任意
+```
+
+`model_id` を書き替えると、**リクエストの `model` と VRAM 見積りの両方**が同時に切り替わります
+(片方だけ変わると「20B に投げているのに 14B の VRAM 見積りを記録した比較結果」が
+静かに生成されるため、これは決定 **D-19** として guard_test で固定しています)。
+
+出荷スイート `suites/ja_basic.toml` は日本語 8 問 × 3 モデル (`qwen3-14b` / `gpt-oss-20b` /
+`qwen3-8b`)、`max_output_tokens = 512` です。
+
+### 出力 (`results/` はコミット対象、`outputs/` は一時物)
+
+| パス | 内容 | Git |
+|---|---|---|
+| `results/<suite_id>/<時刻>-<fp12>/report.md` | 再現条件・モデル比較表・プロンプトごとの応答 (先頭 400 文字 + 折りたたみ) | **コミットする** |
+| `results/.../records.jsonl` | 1 実行 1 行の生ログ (warmup 含む、応答全文の唯一の出典) | **コミットする** |
+| `results/.../run.json` | 再現条件 (`reproduction`) と集計値。ここから `run_fingerprint` を再計算できる | **コミットする** |
+| `results/.../manifests/*.json` | `llmkit` の実行マニフェスト (モデルごと 1 本) | **コミットする** |
+| `outputs/runs/*.json` | `llmkit` 単体実行のマニフェスト。実行のたびに増える一時物 | gitignore |
+
+`results/` は比較結果の記録そのもの (要件書 Phase 2 の受け入れ条件) なのでコミットします。
+`outputs/` は実行ログなので ignore します (決定 **D-24**)。
+スイートには機密情報・個人情報を書かないでください。応答本文ごとコミットされます。
+
+### 速度と VRAM の読み方
+
+- 生成速度の代表値は `eval` (ランタイムの実測) を優先し、無ければ壁時計から算出します。
+  **どちらを使ったかは「速度出典」列に必ず出ます** (決定 **D-21**)。
+- 欠測は `0` ではなく `—` (表) / `null` (JSONL) です。集計から除外し `測定数 n/N` を併記します。
+- VRAM は**見積り (`llmkit`) と実測増分 (`nvidia-smi`) の両方**を別列で記録します。
+  `nvidia-smi` を呼ぶのは `harness/gpu.py` だけで、失敗しても例外を投げず `None` になります
+  (GPU の無い環境でも比較そのものは回ります。決定 **D-23**)。
+- アイドル基準は実行全体で 1 回だけ測り、全モデルで共有します。
+
+### 再現条件は `run_fingerprint` で見る
+
+同じ入力で回し直したときに一致するのは `run_fingerprint` です (`config_sha256` **ではありません**)。
+ハーネスはモデルごとに設定を組み替えて起動するため、`config_sha256` は「ベース設定ファイルの
+同一性」しか表しません。`model_id` だけが違う 2 実行は `config_sha256` が一致します (決定 **D-20**)。
+
+```bash
+# run.json だけでフィンガープリントを再計算できる (reproduction が入力そのもの)
+uv run python -c "import json,sys; from harness import fingerprint_digest; \
+d=json.load(open(sys.argv[1])); print(fingerprint_digest(d['reproduction']) == d['run_fingerprint'])" \
+results/ja_basic/*/run.json
+```
 
 ## Project Structure
 
@@ -216,6 +302,17 @@ scripts/start-reranker.sh
 │   ├── bootstrap.py         # 起動シーケンス
 │   ├── cli.py               # doctor / chat サブコマンド
 │   └── errors.py            # 対処方法つき例外階層
+├── harness/                 # L3: モデル比較ハーネス (Phase 2)
+│   ├── suite.py             # スイート TOML の読み込みと実効設定の導出
+│   ├── gpu.py               # nvidia-smi による VRAM 実測 (呼ぶのはここだけ)
+│   ├── records.py           # 1 実行 1 レコードのスキーマと集計 (中央値 / n/N)
+│   ├── runner.py            # 実行計画・run_fingerprint・スイート実行
+│   ├── report.py            # report.md / records.jsonl / run.json の書き出し
+│   └── cli.py               # python -m harness.cli run [--dry-run]
+├── suites/
+│   └── ja_basic.toml        # 日本語 8 問 × 3 モデルの比較スイート
+├── results/                 # 比較結果 (コミット対象。outputs/ とは扱いが違う)
+│   └── ja_basic/<時刻>-<fp12>/ # report.md / records.jsonl / run.json / manifests/
 ├── configs/
 │   ├── default.toml         # ローカル Ollama 用 (ネイティブ /api/chat)
 │   ├── ollama_openai_compat.toml # ローカル Ollama 用 (OpenAI 互換経路。A/B 比較)

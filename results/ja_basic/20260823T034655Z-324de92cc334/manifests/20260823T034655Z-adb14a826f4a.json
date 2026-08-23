@@ -1,0 +1,65 @@
+{
+  "config_path": "configs/default.toml",
+  "config_sha256": "f9b82bcc204b7e23b08bd39078f5e318204d010a9ae066a34b1b4c90e313dc10",
+  "generation": {
+    "context_tokens": 16384,
+    "max_output_tokens": 512,
+    "model": "qwen3-14b",
+    "seed": 0,
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  "platform": "Linux-6.14.0-37-generic-x86_64-with-glibc2.39",
+  "profile": {
+    "models": [
+      {
+        "model_id": "qwen3-14b",
+        "quantization": "Q4_K",
+        "role": "generation",
+        "served_name": "qwen3:14b-q4_K_M",
+        "serving_runtime": "ollama"
+      },
+      {
+        "model_id": "ruri-v3-310m",
+        "quantization": "unknown (GGUF)",
+        "role": "embedding",
+        "served_name": "hf.co/Targoyle/ruri-v3-310m-GGUF",
+        "serving_runtime": "ollama"
+      },
+      {
+        "model_id": "bge-reranker-v2-m3",
+        "quantization": "Q6_K",
+        "role": "reranker",
+        "served_name": "bge-reranker-v2-m3-Q6_K.gguf",
+        "serving_runtime": "llama_cpp_server"
+      }
+    ],
+    "name": "rag_default"
+  },
+  "python_version": "3.12.3",
+  "run_id": "adb14a826f4a",
+  "runtime": {
+    "api_key_env": "LLMKIT_API_KEY",
+    "api_style": "ollama_native",
+    "base_url": "http://localhost:11434/v1",
+    "endpoint_url": "http://localhost:11434/api/chat",
+    "is_local": true,
+    "kind": "ollama",
+    "timeout_s": 120.0
+  },
+  "schema_version": "1",
+  "started_at_utc": "2026-08-23T03:46:55.363332Z",
+  "vram": {
+    "budget_gib": 14.0,
+    "kv_cache_gib": 2.52,
+    "runtime_overhead_gib": 0.8,
+    "total_gib": 11.98,
+    "weights_gib": {
+      "bge-reranker-v2-m3": 0.28,
+      "qwen3-14b": 7.81,
+      "ruri-v3-310m": 0.57
+    },
+    "weights_total_gib": 8.66,
+    "within_budget": true
+  }
+}

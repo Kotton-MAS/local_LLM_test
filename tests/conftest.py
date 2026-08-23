@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import os
 import socket
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Protocol
 
 import httpx
 import pytest
+
+from harness.gpu import GpuMemory
 
 pytest_plugins = ["pytester"]
 
@@ -200,6 +202,28 @@ def mock_http_client(mock_transport: RecordingTransport) -> Iterator[httpx.Clien
     """``mock_transport`` を使う httpx.Client (使用後に閉じる)。"""
     with mock_transport.client() as client:
         yield client
+
+
+class FakeProbe:
+    """注入する :class:`~harness.gpu.VramProbe`。実プロセスを起動しない。
+
+    ``harness/`` のテストに共有する (F-8-006: 4 ファイルにバイト単位で完全に
+    同一定義されていたものをここへ集約)。呼ばれるたびに ``readings`` を順に
+    返すため、「全モデルが同じアイドル基準を共有する」ような掃引テストが
+    単一値フェイクで検出漏れを起こさない (2026-08-23 実機実行で発見した不具合
+    の再発防止と同じ設計)。
+    """
+
+    def __init__(self, readings: Sequence[GpuMemory | None] = ()) -> None:
+        self._readings = list(readings)
+        self.call_count = 0
+
+    def read(self) -> GpuMemory | None:
+        self.call_count += 1
+        if not self._readings:
+            return None
+        index = min(self.call_count - 1, len(self._readings) - 1)
+        return self._readings[index]
 
 
 class ConfigWriter(Protocol):

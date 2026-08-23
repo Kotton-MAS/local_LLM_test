@@ -167,6 +167,8 @@ cython_debug/
 
 # Project outputs
 outputs/
+# 注: results/ は ignore しない。比較ハーネスの成果物はコミット対象 (決定 D-24)。
+#     outputs/ は実行のたびに増える一時物、results/ は再現条件つきの記録という違い。
 data/
 # docs/ はエージェント成果物 (仕様書・ADR) の置き場のためコミット対象とする
 
