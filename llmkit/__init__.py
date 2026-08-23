@@ -13,7 +13,7 @@ L3 (上位アプリ) はこのモジュールが再エクスポートする公�
 が両者の一致を機械的に固定する)。
 """
 
-from llmkit.bootstrap import BootstrapResult, bootstrap
+from llmkit.bootstrap import BootstrapResult, bootstrap, bootstrap_from_config
 from llmkit.catalog import (
     MODEL_CATALOG,
     ModelRole,
@@ -120,6 +120,7 @@ __all__ = [
     "VramEstimate",
     "api_style_for",
     "bootstrap",
+    "bootstrap_from_config",
     "build_manifest",
     "check_budget",
     "compute_config_sha256",

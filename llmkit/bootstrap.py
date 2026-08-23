@@ -13,6 +13,12 @@
 5 で停止する場合、クライアントは生成されず HTTP は 1 バイトも発行されない。
 「警告のみで継続」しないのは、継続すると実行時 OOM になり原因が特定しにくい
 エラーに化けるため (D-04)。
+
+入口は 2 つある。1 (設定ロード) を含む :func:`bootstrap` と、読み込み済みの
+:class:`~llmkit.config.AppConfig` を受け取って 2 以降だけを行う
+:func:`bootstrap_from_config` である。後者は L3 が ``dataclasses.replace`` で
+設定を上書きしてから起動する経路 (Phase 2 のモデル比較) のために分けたもので、
+:func:`bootstrap` は前者に ``load_config`` を足しただけの薄いラッパである。
 """
 
 from __future__ import annotations
@@ -43,7 +49,7 @@ from llmkit.vram import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["BootstrapResult", "bootstrap"]
+__all__ = ["BootstrapResult", "bootstrap", "bootstrap_from_config"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +91,51 @@ def bootstrap(
         ConfigError: 設定・プロファイル・カタログの解決に失敗した場合。
         VramBudgetExceededError: 想定 VRAM 使用量が予算を超えた場合。
     """
-    config = load_config(config_path)
+    return bootstrap_from_config(
+        load_config(config_path),
+        config_path,
+        profile_name=profile_name,
+        http_client=http_client,
+        output_dir=output_dir,
+        write_manifest_file=write_manifest_file,
+    )
+
+
+def bootstrap_from_config(
+    config: AppConfig,
+    config_path: Path,
+    *,
+    profile_name: str | None = None,
+    http_client: httpx.Client | None = None,
+    output_dir: Path | None = None,
+    write_manifest_file: bool = True,
+) -> BootstrapResult:
+    """読み込み済みの :class:`AppConfig` から推論クライアントを起動する。
+
+    :func:`bootstrap` の本体。設定ファイルを読む前に L3 が
+    ``dataclasses.replace`` で値を差し替えられるよう、ロードと起動を分けている
+    (Phase 2 のモデル比較ハーネスがモデルごとに N 回起動する経路)。
+
+    Warning:
+        ``config`` が実行時に上書きされた場合、``manifest.config_sha256`` は
+        **ベース設定ファイル (``config_path``) の内容ハッシュ**であり、実際に
+        使われた実効値の同一性を表さない。上書き後の 2 実行はモデルが違っても
+        同じ ``config_sha256`` を持つ。実効値の同一性は L3 の
+        ``run_fingerprint`` が担う (D-20)。
+
+    Args:
+        config: 読み込み済み (かつ必要なら上書き済み) の設定。
+        config_path: ``config`` の出所となったベース設定ファイル。
+            ``config_sha256`` の計算にのみ使う。
+        profile_name: 省略時は ``vram.active_profile``。
+        http_client: 注入する ``httpx.Client``。テストは ``MockTransport`` を渡す。
+        output_dir: マニフェストの出力先。省略時は ``outputs/runs/``。
+        write_manifest_file: False ならマニフェストを組み立てるがファイルに書かない。
+
+    Raises:
+        ConfigError: プロファイル・カタログの解決に失敗した場合。
+        VramBudgetExceededError: 想定 VRAM 使用量が予算を超えた場合。
+    """
     profile = resolve_profile(config, profile_name)
     estimate = estimate_resolved_profile(profile, config)
 
