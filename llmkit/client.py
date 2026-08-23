@@ -8,8 +8,11 @@
   ``/chat/completions`` (:class:`OpenAICompatibleClient`)。**分岐は
   :func:`create_chat_client` の 1 か所だけ**に置く (D-10)。HTTP 送信・接続
   エラーの翻訳・ステータス/本文からの例外翻訳・api_key ヘッダ・``httpx.Client``
-  の所有権は :class:`_HttpChatClient` に集約し、具象はリクエストボディの
-  組み立てと応答パースだけを持つ。
+  の所有権は chat 非依存の基底 :class:`_HttpEndpointClient` に集約し、
+  :class:`_HttpChatClient` はチャット固有の流れ、具象はリクエストボディの
+  組み立てと応答パースだけを持つ。埋め込み
+  (:mod:`llmkit.embeddings`) も同じ基底を継承し、**例外翻訳表を 1 実装に
+  保つ** (D-25)。
 - ``httpx.Client`` はコンストラクタで注入できる。テストは
   ``httpx.MockTransport`` を注入することで実 HTTP を 1 バイトも出さない (D-02)。
 - レスポンスは pydantic dataclass + ``TypeAdapter`` で厳格にパースし、必須
@@ -42,7 +45,7 @@ import httpx
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
-from llmkit.catalog import MODEL_CATALOG, resolve_model_spec
+from llmkit.catalog import MODEL_CATALOG, ModelSpec, resolve_model_spec
 from llmkit.config import AppConfig, RuntimeKind
 from llmkit.errors import (
     ContextLengthError,
@@ -367,36 +370,36 @@ def _embedded_error_marker(body_text: str) -> str | None:
     return str(error)
 
 
-class _HttpChatClient(ABC):
-    """HTTP 経由の推論クライアントに共通する実装。
+class _HttpEndpointClient(ABC):
+    """HTTP 経由で推論ランタイムの 1 エンドポイントを叩くクライアントの基底。
 
-    ここに集約するのは HTTP 送信・接続エラーの翻訳・ステータス/本文からの例外
-    翻訳・api_key ヘッダ・``httpx.Client`` の所有権と close。具象が持つのは
-    リクエストボディの組み立て (:meth:`_build_request_body`) と応答のパース
-    (:meth:`_build_result`) だけ。``runtime.kind`` の分岐はここではなく
-    :func:`create_chat_client` の 1 か所だけに置く (D-10)。
+    chat に依存しない部分だけをここに集約する: ``httpx.Client`` の所有権と
+    close、api_key ヘッダ、POST 送信と接続エラーの翻訳、ステータス/本文からの
+    例外翻訳表、JSON デコードとスキーマ違反の翻訳。
+
+    チャット (:class:`_HttpChatClient`) と埋め込み
+    (:class:`llmkit.embeddings.OpenAIEmbeddingClient`) が **同じ翻訳表の唯一の
+    実装** を共有するための基底であり、翻訳表を 2 か所に複製しないことが目的
+    (D-25)。エンドポイント URL (:attr:`endpoint_url`) とリクエスト固有の文脈
+    (:meth:`_request_context`) だけをサブクラスが決める。
     """
 
-    #: この実装が話すワイヤプロトコル。``endpoint_url`` の導出に使う。
-    _api_style: ClassVar[ApiStyle]
-
     def __init__(
-        self, config: AppConfig, *, http_client: httpx.Client | None = None
+        self,
+        config: AppConfig,
+        spec: ModelSpec,
+        *,
+        http_client: httpx.Client | None = None,
     ) -> None:
         """Args:
         config: 読み込み済み設定。送出パラメータの唯一の出典。
+        spec: このクライアントが叩くモデルの解決済みメタデータ。解決方法
+            (どの設定キーを見るか) はサブクラスが決める。
         http_client: 注入する ``httpx.Client``。省略時は設定の
             ``timeout_s`` から生成する (テストでは必ず MockTransport を注入する)。
-
-        Raises:
-            ConfigError: ``runtime.is_local=true`` かつ ``generation.model`` が
-                カタログに無い場合。``is_local=false`` の場合はカタログ未登録
-                でも passthrough で解決される (``resolve_model_spec`` 参照)。
         """
         self._config = config
-        self._spec = resolve_model_spec(
-            config.generation.model, is_local=config.runtime.is_local
-        )
+        self._spec = spec
         self._owns_http_client = http_client is None
         self._http = (
             http_client
@@ -410,9 +413,32 @@ class _HttpChatClient(ABC):
         return self._spec.served_name
 
     @property
+    @abstractmethod
     def endpoint_url(self) -> str:
         """リクエスト先の完全 URL。"""
-        return endpoint_url_for(self._config.runtime.base_url, self._api_style)
+
+    @abstractmethod
+    def _request_context(self) -> str:
+        """例外メッセージに載せる『何をどれだけ要求したか』の記述。
+
+        :class:`~llmkit.errors.OutOfMemoryError` と
+        :class:`~llmkit.errors.ContextLengthError` のメッセージだけが使う。
+        チャットは ``context_tokens=<値>`` を返し、既存のメッセージ文面を
+        そのまま再現する。基底に既定値を置かない (置くと、新しい経路が
+        黙ってチャットの文言を名乗る)。
+        """
+
+    @abstractmethod
+    def _model_setting_reference(self) -> str:
+        """モデル ID の出典となる設定キーの記述 (対処メッセージ用)。
+
+        :class:`~llmkit.errors.ModelNotFoundError` の対処だけが使う。
+        チャットのモデルは ``generation.model`` が出典だが、埋め込みは
+        ``profiles.<プロファイル名>.embedding`` が唯一の出典であり (D-27)、
+        基底が前者を名乗ると「存在しない設定キーを直せ」と案内することに
+        なる。実際に ``generation.model`` を書き換えると、埋め込みは直らない
+        まま生成モデルだけが壊れる。基底に既定値を置かない。
+        """
 
     def close(self) -> None:
         """自前で生成した ``httpx.Client`` だけを閉じる (注入されたものは閉じない)。"""
@@ -429,40 +455,6 @@ class _HttpChatClient(ABC):
         traceback: TracebackType | None,
     ) -> None:
         self.close()
-
-    def chat(self, messages: Sequence[ChatMessage]) -> ChatResult:
-        """発話列を送って 1 応答を得る。
-
-        Raises:
-            RuntimeUnavailableError: ランタイムに接続できない場合。
-            ModelNotFoundError: ランタイム側にモデルが無い場合。
-            OutOfMemoryError: ランタイム側で VRAM が枯渇した場合。
-            ContextLengthError: 要求コンテキスト長が上限を超えた場合。
-            UpstreamError: その他の 4xx/5xx、または応答の解析に失敗した場合。
-        """
-        body = self._build_request_body(messages)
-        logger.debug(
-            "推論リクエストを送信します: url=%s model=%s context_tokens=%d",
-            self.endpoint_url,
-            self.served_name,
-            self._config.generation.context_tokens,
-        )
-        started = time.perf_counter()
-        response = self._send(body)
-        latency_s = time.perf_counter() - started
-
-        self._raise_for_error_status(response)
-        return self._build_result(response, latency_s=latency_s)
-
-    @abstractmethod
-    def _build_request_body(self, messages: Sequence[ChatMessage]) -> dict[str, object]:
-        """設定値をリクエストボディへ配線する (仕様書 §5 有効性観点 E1-E3 / E10)。"""
-
-    @abstractmethod
-    def _build_result(
-        self, response: httpx.Response, *, latency_s: float
-    ) -> ChatResult:
-        """成功応答を :class:`ChatResult` へ変換する (D-07 に従い厳格にパース)。"""
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -511,10 +503,23 @@ class _HttpChatClient(ABC):
             return
         self._raise_translated_error(response.status_code, response.text)
 
+    def _raise_if_body_reports_error(self, response: httpx.Response) -> None:
+        """HTTP 200 のまま本文に載ったエラーも同じ翻訳表へ流す。
+
+        Ollama はネイティブ ``/api/chat`` でも OpenAI 互換エンドポイントでも
+        200 + ``{"error": ...}`` を返すことがある。ステータスだけを見ると
+        「スキーマ違反」に化けて原因が消える。
+        """
+        marker = _embedded_error_marker(response.text)
+        if marker is not None:
+            self._raise_translated_error(
+                response.status_code, marker, from_body_error=True
+            )
+
     def _raise_translated_error(
         self, status: int, body_text: str, *, from_body_error: bool = False
     ) -> NoReturn:
-        """翻訳表。両経路が共有する唯一の実装。
+        """翻訳表。全経路が共有する唯一の実装。
 
         OpenAI のエラースキーマはパースせず、HTTP ステータスと本文の小文字部分
         一致だけで判定する。そのためネイティブ形式の本文にもそのまま成立する。
@@ -552,18 +557,17 @@ class _HttpChatClient(ABC):
             msg,
             remediation=(
                 f"`ollama pull {self._spec.served_name}` を実行するか、"
-                f"generation.model ('{self._spec.model_id}') を見直してください"
+                f"{self._model_setting_reference()} を見直してください"
             ),
         )
 
     def _raise_if_out_of_memory(self, status: int, body: str) -> None:
         if not _contains_marker(body, _OUT_OF_MEMORY_MARKERS):
             return
-        generation = self._config.generation
         msg = (
             f"推論ランタイムで VRAM が不足しました (プロファイル "
-            f"'{self._config.vram.active_profile}', context_tokens="
-            f"{generation.context_tokens}, HTTP {status})"
+            f"'{self._config.vram.active_profile}', {self._request_context()}"
+            f", HTTP {status})"
         )
         raise OutOfMemoryError(
             msg,
@@ -577,12 +581,35 @@ class _HttpChatClient(ABC):
     def _raise_if_context_length_exceeded(
         self, status: int, body: str, *, from_body_error: bool
     ) -> None:
+        """判定条件と判定順序は全経路で共有し、文面だけをフックに委ねる。"""
         if not (
             (status == httpx.codes.BAD_REQUEST or from_body_error)
             and _contains_marker(body, _CONTEXT_LENGTH_MARKERS)
         ):
             return
-        generation = self._config.generation
+        raise ContextLengthError(
+            self._context_length_message(status),
+            remediation=self._context_length_remediation(),
+        )
+
+    @abstractmethod
+    def _context_length_subject(self) -> str:
+        """コンテキスト長超過メッセージの主語。経路ごとに何が長すぎたかが違う。
+
+        チャットは「要求したコンテキスト長 context_tokens=16384 」を返し、
+        埋め込みは「埋め込み入力」を返す。**判定 (カタログ登録済みか
+        passthrough か) は基底に残し、主語だけを差し替える** のが要点で、
+        メッセージ全体をフックにすると F-2-002 の分岐が新しい経路から
+        黙って抜け落ちる (実際に F-9-001 として発生した: 埋め込み経路が
+        placeholder の 1048576 を「モデルの上限」として断言していた)。
+
+        戻り値は直後の「がモデル…」「でモデル…」に続くため、値で終わる
+        経路 (チャット) は末尾に空白を含める。基底に既定値を置かない
+        (置くと、新しい経路が黙ってチャットの主語を名乗る)。
+        """
+
+    def _context_length_message(self, status: int) -> str:
+        """コンテキスト長超過のメッセージ。主語だけが経路ごとに違う。"""
         # F-2-002: max_context_tokens はカタログ登録済みモデルの実値。
         # resolve_model_spec の passthrough (is_local=false かつ未登録)
         # では _PASSTHROUGH_MAX_CONTEXT_TOKENS という placeholder が
@@ -590,28 +617,31 @@ class _HttpChatClient(ABC):
         # メッセージになる (例: 上限 1048576 を超えたと言いつつ実際の
         # 要求は 16384)。カタログ由来かどうかで文言を分ける。
         if self._spec.model_id in MODEL_CATALOG:
-            msg = (
-                f"要求したコンテキスト長 context_tokens="
-                f"{generation.context_tokens} がモデル "
+            return (
+                f"{self._context_length_subject()}がモデル "
                 f"'{self._spec.served_name}' の上限 max_context_tokens="
                 f"{self._spec.max_context_tokens} を超えています (HTTP {status})"
             )
-        else:
-            msg = (
-                f"要求したコンテキスト長 context_tokens="
-                f"{generation.context_tokens} でモデル "
-                f"'{self._spec.served_name}' がコンテキスト長超過を"
-                f"報告しました (HTTP {status})。llmkit/catalog.py に未登録の"
-                "モデルのため上限は不明です。ランタイム/API 提供元のドキュメ"
-                "ントで上限を確認してください"
-            )
-        raise ContextLengthError(
-            msg,
-            remediation=(
-                "generation.context_tokens を減らすか、"
-                "より長いコンテキストを扱えるモデルへ切り替えてください"
-            ),
+        return (
+            f"{self._context_length_subject()}でモデル "
+            f"'{self._spec.served_name}' がコンテキスト長超過を"
+            f"報告しました (HTTP {status})。llmkit/catalog.py に未登録の"
+            "モデルのため上限は不明です。ランタイム/API 提供元のドキュメ"
+            "ントで上限を確認してください"
         )
+
+    @abstractmethod
+    def _context_length_remediation(self) -> str:
+        """コンテキスト長超過の対処。経路ごとに直す設定キーが違う。
+
+        チャットは ``generation.context_tokens`` を、埋め込みはチャンクの
+        上限トークン数を案内する。基底に既定値を置くと、この基底へ新しく
+        載る経路 (リランカー) が上書きを忘れたまま気づかれずに済んでしまい、
+        チャット向けの対処文面を誤って名乗る (round-10 レビュー: 埋め込みの
+        ``_context_length_message`` が F-9-001 として一度これと同型の欠陥を
+        起こしている。対処メッセージ側でも同じ型の欠陥が起き得るため、
+        ``ABC`` と mypy が上書き漏れを機械的に検出できるよう abstract にする)。
+        """
 
     def _raise_generic_upstream_error(
         self, status: int, *, from_body_error: bool
@@ -657,6 +687,104 @@ class _HttpChatClient(ABC):
             f"(url={self.endpoint_url}): {_format_validation_error(exc)}"
         )
         raise UpstreamError(msg, remediation=remediation) from exc
+
+
+class _HttpChatClient(_HttpEndpointClient):
+    """HTTP 経由の推論クライアントに共通する実装。
+
+    HTTP 送信・例外翻訳・``httpx.Client`` の所有権は基底
+    :class:`_HttpEndpointClient` が持つ。ここに残るのはチャット固有の流れ
+    (:meth:`chat`) と、チャットのエンドポイント導出・要求文脈だけ。具象が持つ
+    のはリクエストボディの組み立て (:meth:`_build_request_body`) と応答の
+    パース (:meth:`_build_result`) だけ。``runtime.kind`` の分岐はここではなく
+    :func:`create_chat_client` の 1 か所だけに置く (D-10)。
+    """
+
+    #: この実装が話すワイヤプロトコル。``endpoint_url`` の導出に使う。
+    _api_style: ClassVar[ApiStyle]
+
+    def __init__(
+        self, config: AppConfig, *, http_client: httpx.Client | None = None
+    ) -> None:
+        """Args:
+        config: 読み込み済み設定。送出パラメータの唯一の出典。
+        http_client: 注入する ``httpx.Client``。省略時は設定の
+            ``timeout_s`` から生成する (テストでは必ず MockTransport を注入する)。
+
+        Raises:
+            ConfigError: ``runtime.is_local=true`` かつ ``generation.model`` が
+                カタログに無い場合。``is_local=false`` の場合はカタログ未登録
+                でも passthrough で解決される (``resolve_model_spec`` 参照)。
+        """
+        super().__init__(
+            config,
+            resolve_model_spec(
+                config.generation.model, is_local=config.runtime.is_local
+            ),
+            http_client=http_client,
+        )
+
+    @property
+    def endpoint_url(self) -> str:
+        """リクエスト先の完全 URL。"""
+        return endpoint_url_for(self._config.runtime.base_url, self._api_style)
+
+    def _request_context(self) -> str:
+        """チャットが要求したコンテキスト長 (例外メッセージ用)。"""
+        return f"context_tokens={self._config.generation.context_tokens}"
+
+    def _context_length_subject(self) -> str:
+        """チャットが長すぎたのは「要求したコンテキスト長」。
+
+        末尾の空白は、基底の文型が直後に「がモデル…」を続けるため。
+        値 (``context_tokens=16384``) で終わる主語なので区切りが要る。
+        """
+        return f"要求したコンテキスト長 {self._request_context()} "
+
+    def _model_setting_reference(self) -> str:
+        """チャットのモデル ID の出典は ``generation.model`` の 1 か所。"""
+        return f"generation.model ('{self._spec.model_id}')"
+
+    def _context_length_remediation(self) -> str:
+        """チャットで直すのは ``generation.context_tokens``。文面は不変。"""
+        return (
+            "generation.context_tokens を減らすか、"
+            "より長いコンテキストを扱えるモデルへ切り替えてください"
+        )
+
+    def chat(self, messages: Sequence[ChatMessage]) -> ChatResult:
+        """発話列を送って 1 応答を得る。
+
+        Raises:
+            RuntimeUnavailableError: ランタイムに接続できない場合。
+            ModelNotFoundError: ランタイム側にモデルが無い場合。
+            OutOfMemoryError: ランタイム側で VRAM が枯渇した場合。
+            ContextLengthError: 要求コンテキスト長が上限を超えた場合。
+            UpstreamError: その他の 4xx/5xx、または応答の解析に失敗した場合。
+        """
+        body = self._build_request_body(messages)
+        logger.debug(
+            "推論リクエストを送信します: url=%s model=%s context_tokens=%d",
+            self.endpoint_url,
+            self.served_name,
+            self._config.generation.context_tokens,
+        )
+        started = time.perf_counter()
+        response = self._send(body)
+        latency_s = time.perf_counter() - started
+
+        self._raise_for_error_status(response)
+        return self._build_result(response, latency_s=latency_s)
+
+    @abstractmethod
+    def _build_request_body(self, messages: Sequence[ChatMessage]) -> dict[str, object]:
+        """設定値をリクエストボディへ配線する (仕様書 §5 有効性観点 E1-E3 / E10)。"""
+
+    @abstractmethod
+    def _build_result(
+        self, response: httpx.Response, *, latency_s: float
+    ) -> ChatResult:
+        """成功応答を :class:`ChatResult` へ変換する (D-07 に従い厳格にパース)。"""
 
 
 class OpenAICompatibleClient(_HttpChatClient):
@@ -775,11 +903,7 @@ class OllamaNativeClient(_HttpChatClient):
     def _raise_for_error_status(self, response: httpx.Response) -> None:
         """エラーステータスに加え、HTTP 200 + 本文 ``error`` も翻訳表へ流す。"""
         super()._raise_for_error_status(response)
-        marker = _embedded_error_marker(response.text)
-        if marker is not None:
-            self._raise_translated_error(
-                response.status_code, marker, from_body_error=True
-            )
+        self._raise_if_body_reports_error(response)
 
     def _build_result(
         self, response: httpx.Response, *, latency_s: float
