@@ -22,6 +22,7 @@ import llmkit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_DIR = REPO_ROOT / "llmkit"
+HARNESS_DIR = REPO_ROOT / "harness"
 
 #: L2 を構成するサブモジュール。それぞれが自分の公開 API を ``__all__`` で
 #: 宣言しており、llmkit.__all__ はこれらの和集合と一致するべき (F-1-002)。
@@ -130,9 +131,16 @@ def test_schemas_use_pydantic_dataclasses_not_basemodel() -> None:
 
     継承するとその定義行が mypy の ``disallow_any_explicit`` に触れ、
     ``# type: ignore`` を撒く以外に通す手段が無くなる。
+
+    走査範囲は L2 (``llmkit/``) と L3 (``harness/``) の両方。ハーネスも
+    スイート TOML を pydantic で検証しており、同じ制約の下にある。
     """
     offenders: list[str] = []
-    for module_path in sorted(PACKAGE_DIR.glob("*.py")):
+    module_paths = sorted(PACKAGE_DIR.glob("*.py")) + sorted(HARNESS_DIR.glob("*.py"))
+    assert len(module_paths) > len(list(PACKAGE_DIR.glob("*.py"))), (
+        "harness/ が走査対象から外れています"
+    )
+    for module_path in module_paths:
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef):
@@ -142,7 +150,9 @@ def test_schemas_use_pydantic_dataclasses_not_basemodel() -> None:
                 if isinstance(base, ast.Name):
                     name = base.id
                 if name == "BaseModel":
-                    offenders.append(f"{module_path.name}::{node.name}")
+                    offenders.append(
+                        f"{module_path.parent.name}/{module_path.name}::{node.name}"
+                    )
 
     assert not offenders, f"BaseModel を継承しているクラス: {offenders}"
 
