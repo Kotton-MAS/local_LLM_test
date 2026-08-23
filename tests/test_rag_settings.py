@@ -265,3 +265,85 @@ def test_the_shipped_sample_settings_contain_no_absolute_paths() -> None:
     assert "/home/" not in text
     assert "~" not in text
     assert os.sep + os.sep not in text
+
+
+def test_the_same_config_read_by_relative_and_absolute_path_is_equal(
+    tmp_path: Path,
+) -> None:
+    """同じ設定ファイルを相対で読んでも絶対で読んでも等価になること。
+
+    ``source_path`` だけが正規化されていないと、他の全フィールドが同じでも
+    ``RagSettings`` の等価性が偽になる。3b の ``index_fingerprint`` は設定から
+    導くため、**起動ディレクトリを変えただけで差分更新が全再構築に化ける**
+    (D-28 が fingerprint 不一致で全再構築するため)。
+
+    実行ディレクトリに依存しないよう、比較は ``tmp_path`` 配下で行う。
+    """
+    vault = tmp_path / "v"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "a.md").write_text("# a\n", encoding="utf-8")
+    config = tmp_path / "s.toml"
+    config.write_text(
+        '[vault]\nid = "s"\ndir = "v"\n[index]\ndir = "../idx"\n', encoding="utf-8"
+    )
+
+    absolute = rag.load_settings(config)
+    # 同じファイルを、``..`` を挟んだ等価な別表記で読む。``.`` は pathlib が
+    # 生成時に畳んでしまい正規化を通らないので使えない (実際それで変異検証が
+    # 素通りした)。``..`` は ``resolve()`` するまで残る。
+    (tmp_path / "sub").mkdir()
+    equivalent = rag.load_settings(tmp_path / "sub" / ".." / "s.toml")
+
+    assert absolute == equivalent, (
+        "同じ設定ファイルの別表記で RagSettings が等価にならない。"
+        f"source_path: {absolute.source_path} vs {equivalent.source_path}"
+    )
+    assert absolute.source_path.is_absolute()
+
+
+@pytest.mark.parametrize(
+    ("relative_target", "accepted"),
+    [
+        ("data/index/sample", True),
+        ("index/sample", False),
+        ("rag/generated", False),
+        (".", False),
+    ],
+    ids=["data-is-allowed", "repo-root-child", "inside-sources", "repo-root-itself"],
+)
+def test_index_dir_inside_the_repository_must_be_ignored_by_git(
+    tmp_path: Path, relative_target: str, accepted: bool
+) -> None:
+    """索引の出力先がリポジトリ内の追跡され得る場所なら拒むこと。
+
+    索引のチャンクは vault 本文の逐語コピーである。このリポジトリは PUBLIC
+    なので、実 vault を索引しつつ出力先をリポジトリ内 (``data/`` 以外) に
+    向けると個人ノートの本文がそのままコミットされる。キットの自動コミットは
+    ``git add -A`` で人手の判断を挟まないため、気づく機会が無い。
+
+    ``.gitignore`` を読んで判定する案は採らない。出力先の安全性が「別ファイルの
+    内容」に暗黙に依存する状態になり、``.gitignore`` を編集した瞬間に設定側の
+    保証が静かに消える。許可する場所を ``data/`` に固定して設定層で落とす。
+
+    リポジトリの検出に ``git`` コマンドを起動しないのは、検証結果がコマンドの
+    有無や実行環境に依存すると CI とローカルで結果が変わるため。
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    vault = tmp_path / "v"
+    (vault / "notes").mkdir(parents=True)
+    (vault / "notes" / "a.md").write_text("# a\n", encoding="utf-8")
+    target = (repo_root / relative_target).resolve()
+    config = tmp_path / "s.toml"
+    config.write_text(
+        f'[vault]\nid = "s"\ndir = "{vault}"\n[index]\ndir = "{target}"\n',
+        encoding="utf-8",
+    )
+
+    if accepted:
+        assert rag.load_settings(config).index_dir == target
+        return
+
+    with pytest.raises(ConfigError) as excinfo:
+        rag.load_settings(config)
+    assert "追跡" in str(excinfo.value)
+    assert "data/" in str(excinfo.value), "対処に許可される場所が書かれていない"
