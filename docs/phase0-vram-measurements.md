@@ -101,21 +101,113 @@ GPU 内に収まった点のみを使い `合計 = (重み + オーバーヘッ�
 A/B 比較するための設定として `configs/ollama_openai_compat.toml` を追加しました
 (こちらでは CONTEXT が 4096 のままになる = 上表の再現)。
 
-## 埋め込み・リランカー
+## 埋め込み・リランカー (2026-08-23 実測、当初「取得不能」としていた項目)
 
-`hf.co/cl-nagoya/ruri-v3-310m` と `hf.co/cl-nagoya/ruri-reranker-large` は GGUF を持たない
-sentence-transformers 形式のため `ollama pull` できません。Phase 0 の受け入れ条件のうち
-「埋め込みモデル・リランカーの取得と単発実行」は**未達**です。Phase 3 着手前に方式を決める必要があります
-(カタログには仮値のまま残し、`source_note` に「取得不能」と理由を明記する方針を **D-14** に記録しました)。
+当初 `hf.co/cl-nagoya/ruri-v3-310m` と `hf.co/cl-nagoya/ruri-reranker-large` は GGUF 非提供のため
+`ollama pull` できず、Phase 0 の受け入れ条件2項目を満たせていなかった。**いずれも解決した。**
 
-そのため構成1 (14B + 埋め込み + リランカー) の同居実測も未実施です。
+### 埋め込み: 有志の GGUF 変換版で取得できた
+
+`ollama pull` できなかったのは Hugging Face の**元リポジトリ** (sentence-transformers 形式) だけで、
+GGUF 変換版なら Ollama で扱える。
+
+```bash
+ollama pull hf.co/Targoyle/ruri-v3-310m-GGUF   # 336 MB
+```
+
+| 項目 | 結果 |
+|---|---|
+| エンドポイント | `/v1/embeddings` (Ollama) |
+| 次元数 | 768 |
+| 日本語の意味的分離 | 関連あり 0.9194 / 無関係 0.7820 (差 **+0.1375**) |
+| VRAM 実測 | **0.57 GiB** |
+
+### リランカー: Ollama では不可能。llama.cpp で解決
+
+**Ollama にはリランキング API が無い。**
+
+| エンドポイント | 結果 |
+|---|---|
+| `POST /api/rerank` | HTTP 404 |
+| `POST /v1/rerank` | HTTP 404 |
+
+最新の v0.33.0-rc2 でも未対応で、GitHub issue (`Reranking models` / `Add reranking support` /
+`Add reranking in new engine`) はいずれも open のまま。GGUF 自体は存在するが、
+**スコアを返すエンドポイントが無いため Ollama に載せても使えない。**
+
+そこで **llama.cpp の `llama-server`** を別ポートで併走させた。要件書が第一候補としていた
+`Ruri Reranker` は GGUF が存在しないため、要件書が代替として挙げている
+**`BGE Reranker v2-m3`** を採用した。
+
+- この環境には CUDA toolkit が無いが、**Vulkan が RTX 4070 Ti SUPER を認識**したため
+  プリビルドバイナリ (33 MB) で GPU が使える。**ソースビルド不要**
+- llama.cpp: `b10586` の `llama-b10586-bin-ubuntu-vulkan-x64.tar.gz`
+- モデル: `gpustack/bge-reranker-v2-m3-GGUF` の `bge-reranker-v2-m3-Q6_K.gguf` (478 MB)
+
+| 項目 | 結果 |
+|---|---|
+| エンドポイント | `/v1/rerank` (llama-server, port 8081) |
+| 日本語のスコア分離 | 関連 **+0.80 / +0.63** vs 無関係 **-11.02 / -11.03** |
+| **50ペアの所要時間** | **140 ms** (3回の中央値。要件書の目安 500〜800ms を下回る) |
+| VRAM 実測 | **0.28 GiB** |
+
+## 構成1 の同居実測 (2026-08-23)
+
+生成 + 埋め込み + リランカーを同時に常駐させた状態を測定した。
+
+| 段階 | VRAM 累計 | 増分 |
+|---|---|---|
+| アイドル (デスクトップ等) | 0.56 GiB | — |
+| + リランカー (llama-server 常駐) | 0.84 GiB | **0.28** |
+| + 生成 `qwen3:14b-q4_K_M` @16384 | 11.96 GiB | **11.12** |
+| + 埋め込み `ruri-v3-310m` | **12.53 GiB** | **0.57** |
+
+- **要件書の構成1 目安「約 12〜13GB」に収まった。** 余力 3.46 GiB (15.99 − 12.53)
+- 生成・埋め込みとも `ollama ps` で **100% GPU**
+- `OLLAMA_MAX_LOADED_MODELS` の設定変更は**不要**だった (既定で2モデル同居)
+- リランカーは別プロセス (llama-server) が確保するため、`ollama ps` には現れない
 
 ## 受け入れ条件の充足状況
+
+**Phase 0 は全項目クリア (2026-08-23)。**
 
 | 条件 | 状態 |
 |---|---|
 | `nvidia-smi` が GPU を認識し VRAM 16GB が報告される | 達成 (16376 MiB) |
 | Ollama が起動し OpenAI 互換エンドポイントが応答する | 達成 |
-| 生成・埋め込み・リランカーの全てが取得済みで単発実行が成功 | **未達** (生成3種のみ) |
+| 生成・埋め込み・リランカーの全てが取得済みで単発実行が成功 | **達成** (埋め込みは GGUF 変換版、リランカーは llama-server 経由) |
 | 各モデルの実測 VRAM 使用量を記録した表が存在する | 達成 (本ドキュメント) |
-| 構成1 が実測で 16GB 以内に収まることを確認 | **未実施** (埋め込み・リランカー未取得のため) |
+| 構成1 が実測で 16GB 以内に収まることを確認 | **達成** (12.53 GiB、余力 3.46 GiB) |
+
+## 環境の再現手順
+
+### Ollama (生成 + 埋め込み)
+
+インストールは公式スクリプト (`https://ollama.com/install.sh`) を取得して内容を確認してから実行する。
+その後、以下を取得する。
+
+```bash
+ollama pull qwen3:14b-q4_K_M                   # 9.3 GB
+ollama pull gpt-oss:20b                        # 13.8 GB
+ollama pull qwen3:8b-q4_K_M                    # 5.2 GB
+ollama pull hf.co/Targoyle/ruri-v3-310m-GGUF   # 336 MB (埋め込み)
+```
+
+### llama.cpp (リランカー)
+
+CUDA toolkit は不要。Vulkan が NVIDIA GPU を認識していれば動く (`vulkaninfo --summary` で確認)。
+
+```bash
+# バイナリ (ソースビルド不要)
+mkdir -p ~/.local/opt/llama.cpp
+curl -sLo /tmp/llama-vulkan.tar.gz \
+  https://github.com/ggml-org/llama.cpp/releases/download/b10586/llama-b10586-bin-ubuntu-vulkan-x64.tar.gz
+tar xzf /tmp/llama-vulkan.tar.gz -C ~/.local/opt/llama.cpp --strip-components=1
+
+# モデル
+mkdir -p ~/.local/share/llama-models
+curl -sLo ~/.local/share/llama-models/bge-reranker-v2-m3-Q6_K.gguf \
+  https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q6_K.gguf
+```
+
+起動はリポジトリの `scripts/start-reranker.sh` を使う (パスは環境変数で上書き可能)。
